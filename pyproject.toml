@@ -4,10 +4,12 @@ version = "0.1.0"
 description = "GPU-accelerated statistical mechanics simulations"
 readme = "README.md"
 requires-python = ">=3.12"
+dependencies = []
 
 [project.optional-dependencies]
 test = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
 ]
 
 [build-system]
