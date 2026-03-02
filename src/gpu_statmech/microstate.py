@@ -37,7 +37,8 @@ class PipelineStage(Enum):
     ISSUE = auto()
     EXECUTE = auto()
     WRITEBACK = auto()
-    STALL = auto()  # Blocked on data, resource, or memory
+    STALL = auto()   # Blocked on data, resource, or memory
+    IDLE = auto()    # Warp slot unused / not scheduled
 
 
 class MemoryLevel(Enum):

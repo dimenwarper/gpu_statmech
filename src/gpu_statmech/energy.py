@@ -241,12 +241,17 @@ class EnergyFunctional:
         case of E when only α₁ and α₂ are nonzero) and the full energy
         functional.  Useful for validation (Section 7.1).
 
-        E_roofline ≈ α₁·(1 – compute_efficiency) + α₂·(1 – bw_efficiency)
+        The roofline model identifies the *active bottleneck*:
+          - Compute-bound  (AI ≥ ridge): memory bandwidth is NOT the bottleneck;
+            penalise only wasted compute capacity.
+          - Memory-bound   (AI <  ridge): compute is NOT the bottleneck;
+            penalise only wasted bandwidth.
 
-        where compute_efficiency = achieved / peak_compute and
-        bw_efficiency = (achieved / AI) / peak_bw, capped at 1.
+        This mirrors the physical interpretation — if a kernel is running at
+        peak compute, E_hardware ≈ 0 even though bandwidth utilisation is low.
         """
         compute_eff = min(point.achieved_flops / point.peak_compute_flops, 1.0)
+
         if point.peak_memory_bandwidth > 0 and point.arithmetic_intensity > 0:
             bw_eff = min(
                 point.achieved_flops
@@ -256,7 +261,9 @@ class EnergyFunctional:
         else:
             bw_eff = 0.0
 
-        return (
-            self.weights.sm_utilization * (1.0 - compute_eff)
-            + self.weights.mem_bandwidth * (1.0 - bw_eff)
-        )
+        if point.is_compute_bound:
+            # Memory bandwidth is not the bottleneck — only penalise idle compute.
+            return self.weights.sm_utilization * (1.0 - compute_eff)
+        else:
+            # Compute is not the bottleneck — only penalise idle bandwidth.
+            return self.weights.mem_bandwidth * (1.0 - bw_eff)
