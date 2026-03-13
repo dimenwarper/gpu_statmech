@@ -31,3 +31,10 @@
 ### Validation
 
 - `uv run pytest -q` -> `353 passed`
+
+### Experiment clean-up
+
+- Updated `experiments/theoretical_calculations/01_carnot_curve.py` to use the fixed-load single-GPU model `eta_hw = <W_hw>/<E_in>` with `target_activity = 0.20`, and to report the current boundary-optimum caveat explicitly.
+- Updated `experiments/theoretical_calculations/02_memory_hierarchy.py` to remove the misleading literal reuse-count claim and to keep the roofline plot in bytes/cycle, matching the partition-function units.
+- Updated `experiments/theoretical_calculations/03_scaling_efficiency.py` to label the current multi-GPU path honestly as a legacy topology proxy rather than a timing-accurate overlap model.
+- Re-ran experiments 01-03 with `uv run --with matplotlib python ...` to refresh their figures and outputs.

@@ -1,13 +1,15 @@
 """
 Experiment 01: H100 Carnot Curve
 =================================
-Sweeps β from low (hot/loaded) to high (cold/idle) and plots:
-  - η_hw(β) = 1 - <E(β)>          hardware efficiency
-  - S(β)                           entropy (execution-state degeneracy)
-  - Cv(β)                          specific heat (sensitivity to load)
+Sweeps β from low (hot/loaded) to high (cold/idle) at fixed target activity
+and plots:
+  - η_hw(β) = <W_hw> / <E_in>       hardware efficiency
+  - S(β)                            entropy (execution-state degeneracy)
+  - Cv(β)                           specific heat (sensitivity to load)
   - Decomposed log-Z contributions  (compute / memory / comm)
 
-The peak of η_hw is η_hw,max — the H100 Carnot limit.
+The peak of η_hw within the sweep range is the current single-GPU limit
+predicted by the fixed-load model.
 
 All from hardware spec numbers only. No simulator, no GPU needed.
 """
@@ -43,31 +45,45 @@ print("=" * 60)
 print("Experiment 01: H100 Carnot Curve")
 print("=" * 60)
 
-betas = np.linspace(0.05, 8.0, 300).tolist()
+target_activity = 0.20
+betas = np.linspace(0.05, 10.0, 300).tolist()
 print(f"  β sweep: {betas[0]:.2f} → {betas[-1]:.2f}  ({len(betas)} points)")
+print(f"  fixed target activity: {target_activity:.2f}")
 
-states = beta_sweep(betas)
-etas      = [1.0 - max(0.0, min(1.0, s.mean_waste)) for s in states]
+states = beta_sweep(betas, target_activity=target_activity)
+etas      = [s.eta_hw          for s in states]
 entropies = [s.entropy         for s in states]
 cv        = [s.specific_heat   for s in states]
 lz_c      = [s.log_Z_compute   for s in states]
 lz_m      = [s.log_Z_memory    for s in states]
 lz_k      = [s.log_Z_comm      for s in states]
+fields    = [s.work_field      for s in states]
 
 # ---------------------------------------------------------------------------
 # Carnot limit
 # ---------------------------------------------------------------------------
 
-limit = derive_carnot_limit()
+limit = derive_carnot_limit(
+    beta_min=betas[0],
+    beta_max=betas[-1],
+    n_beta=len(betas),
+    target_activity=target_activity,
+)
 beta_opt = limit.beta_optimal
 eta_max  = limit.eta_hw_max
+boundary_opt = abs(beta_opt - betas[-1]) < 1e-9
 
 roofline = verify_roofline_recovery()
 
 print()
-print("  H100 Carnot Limit")
+print("  Fixed-Load Single-GPU Limit")
 print(f"    η_hw,max          = {eta_max:.4f}  ({eta_max*100:.2f}%)")
 print(f"    β_optimal         = {beta_opt:.4f}")
+print(f"    h*(β_opt)         = {limit.work_field_optimal:.4f}")
+print(f"    target activity   = {limit.target_activity:.2f}")
+if boundary_opt:
+    print("    note              = peak is at the sweep boundary;")
+    print("                        current model still lacks an interior β optimum")
 print(f"    naive Carnot η    = {roofline['naive_carnot_efficiency']:.4f}"
       f"  (1 - T_reg/T_HBM)")
 print()
@@ -83,8 +99,8 @@ print()
 print("  Carnot-optimal conditions")
 print(f"    AI_min            = {limit.roofline_intensity:.2f} FLOP/byte")
 print(f"    min warp occ.     = {limit.min_warp_occupancy:.3f}")
-for lvl, r in limit.min_reuse_factors.items():
-    print(f"    min reuse {lvl:<6s}  = {r:.1f}×")
+print("    note              = legacy min_reuse_factors are omitted here;")
+print("                        see experiment 02 for the dimensional caveat")
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +118,11 @@ ax0.axhline(eta_max * 100, color="#16a34a", ls=":", lw=1.5,
             label=f"η_hw,max = {eta_max*100:.2f}%")
 ax0.set_xlabel("β  (inverse resource-pressure)", fontsize=11)
 ax0.set_ylabel("η_hw  (%)", fontsize=11)
-ax0.set_title("H100 Hardware Efficiency vs Inverse Temperature", fontsize=13, fontweight="bold")
+ax0.set_title(
+    f"H100 Hardware Efficiency vs Inverse Temperature  (target activity = {target_activity:.2f})",
+    fontsize=13,
+    fontweight="bold",
+)
 ax0.legend(fontsize=10)
 ax0.set_xlim(betas[0], betas[-1])
 ax0.set_ylim(0, 105)
@@ -129,7 +149,7 @@ ax2.set_xlim(betas[0], betas[-1])
 ax2.set_ylim(bottom=0)
 ax2.grid(alpha=0.3)
 
-fig.suptitle("H100 Thermodynamic Carnot Curve  —  theoretical calculations only",
+fig.suptitle("H100 Fixed-Load Thermodynamic Efficiency Curve  —  theoretical calculations only",
              fontsize=12, style="italic", y=1.01)
 
 out = FIGURES / "01_carnot_curve.png"
@@ -152,9 +172,15 @@ ax.plot(betas, [v - lz_k[b1_idx] for v in lz_k], color="#d97706", lw=2, label="l
 ax.axvline(beta_opt, color="#dc2626", ls="--", lw=1.5, label=f"β_optimal")
 ax.set_xlabel("β", fontsize=11)
 ax.set_ylabel("Δ ln Z  (relative to β=1)", fontsize=11)
-ax.set_title("Partition Function Decomposition:  ln Z = ln Z_compute + ln Z_memory + ln Z_comm",
+ax.set_title("Partition Function Decomposition at Fixed Activity",
              fontsize=12, fontweight="bold")
-ax.legend(fontsize=10)
+ax2 = ax.twinx()
+ax2.plot(betas, fields, color="#7c3aed", lw=1.5, alpha=0.8, label="solved h(β)")
+ax2.set_ylabel("Solved work field  h", fontsize=11, color="#7c3aed")
+ax2.tick_params(axis="y", colors="#7c3aed")
+lines1, labels1 = ax.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax.legend(lines1 + lines2, labels1 + labels2, fontsize=10, loc="best")
 ax.set_xlim(betas[0], betas[-1])
 ax.grid(alpha=0.3)
 

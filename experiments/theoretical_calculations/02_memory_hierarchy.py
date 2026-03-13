@@ -8,9 +8,10 @@ This experiment:
   1. Shows the effective temperature of each level (T_eff = latency_ratio).
   2. Plots how Z_memory changes as a function of β — each level's
      contribution to the transfer-matrix product.
-  3. Sweeps the working-set size across levels and shows how the
-     minimum reuse requirement changes.
-  4. Shows the roofline ridge point as a function of HBM bandwidth.
+  3. Prints per-level arithmetic-intensity thresholds from the current
+     bandwidth model.
+  4. Shows the roofline ridge point as a function of HBM bandwidth in
+     bytes/cycle, matching the partition-function units.
 
 All purely from the hardware spec numbers in H100_MEMORY_LEVELS.
 """
@@ -28,10 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from gpu_statmech.partition_function import (
     H100_MEMORY_LEVELS,
     H100_SM_CONFIG,
-    MemoryLevel,
     _transfer_matrix,
     z_memory,
-    beta_sweep,
 )
 from gpu_statmech.carnot import derive_carnot_limit
 
@@ -68,6 +67,11 @@ for lvl in H100_MEMORY_LEVELS:
 
 betas = np.linspace(0.05, 8.0, 200).tolist()
 z_mem_vals = [z_memory(b, H100_MEMORY_LEVELS, n_bins=64) for b in betas]
+limit = derive_carnot_limit(
+    beta_min=betas[0],
+    beta_max=betas[-1],
+    n_beta=len(betas),
+)
 
 # Per-level transfer matrix spectral norm (largest singular value) at each β
 # This captures how much each level "squeezes" the state distribution
@@ -78,24 +82,25 @@ for b in betas:
         norms[H100_MEMORY_LEVELS[i].name].append(float(np.linalg.norm(T, ord=2)))
 
 # ---------------------------------------------------------------------------
-# 3. Minimum reuse factors from the Carnot limit
+# 3. Per-level arithmetic-intensity thresholds
 # ---------------------------------------------------------------------------
 
-limit = derive_carnot_limit()
 print()
-print("  Minimum reuse factors (from Carnot-optimal conditions)")
-print(f"  {'Level':<12} {'min_reuse':>12}  {'Interpretation'}")
+print("  Per-level arithmetic-intensity thresholds")
+print(f"  {'Level':<12} {'AI_min':>12}  {'Interpretation'}")
 print("  " + "-" * 60)
-for lvl_name, reuse in limit.min_reuse_factors.items():
-    print(f"  {lvl_name:<12} {reuse:>10.1f}×  "
-          f"  each byte loaded must be used ≥{reuse:.0f}× before eviction")
+for lvl in H100_MEMORY_LEVELS:
+    ai_min = H100_SM_CONFIG.peak_flops_per_cycle / max(lvl.bandwidth_bytes_per_cycle, 1.0)
+    print(f"  {lvl.name:<12} {ai_min:>10.3f}  "
+          f"  FLOPs required per byte transferred at this level to saturate compute")
+print("  Note: the legacy min_reuse_factors output in carnot.py is omitted here until")
+print("        that formula is recalibrated as a true dimensionless reuse count.")
 
 # ---------------------------------------------------------------------------
 # 4. Roofline ridge as function of HBM bandwidth
 # ---------------------------------------------------------------------------
 
-bw_range_gb_s = np.linspace(100, 4000, 50)  # GB/s
-bw_range_bytes_per_cycle = bw_range_gb_s * 1e9 / 1.98e9  # at 1.98 GHz
+bw_range_bytes_per_cycle = np.linspace(250, 8000, 50)
 ridge_points = (H100_SM_CONFIG.peak_flops_per_cycle
                 / bw_range_bytes_per_cycle)
 h100_ridge = (H100_SM_CONFIG.peak_flops_per_cycle
@@ -154,11 +159,17 @@ ax.set_yscale("log")
 
 # --- Roofline ridge vs HBM bandwidth ---------------------------------------
 ax = axes[1, 1]
-ax.plot(bw_range_gb_s, ridge_points, color="#7c3aed", lw=2)
-ax.axvline(3350, color="#dc2626", ls="--", lw=1.5, label="H100 HBM (3.35 TB/s)")
+ax.plot(bw_range_bytes_per_cycle, ridge_points, color="#7c3aed", lw=2)
+ax.axvline(
+    H100_MEMORY_LEVELS[-1].bandwidth_bytes_per_cycle,
+    color="#dc2626",
+    ls="--",
+    lw=1.5,
+    label=f"H100 HBM ({H100_MEMORY_LEVELS[-1].bandwidth_bytes_per_cycle:.0f} B/cycle)",
+)
 ax.axhline(h100_ridge, color="#16a34a", ls=":", lw=1.5,
            label=f"H100 ridge = {h100_ridge:.1f} FLOP/byte")
-ax.set_xlabel("HBM Bandwidth  (GB/s)", fontsize=11)
+ax.set_xlabel("HBM Bandwidth  (bytes/cycle)", fontsize=11)
 ax.set_ylabel("Roofline Ridge  (FLOP/byte)", fontsize=11)
 ax.set_title("Roofline Ridge vs HBM Bandwidth", fontsize=12)
 ax.legend(fontsize=9)
