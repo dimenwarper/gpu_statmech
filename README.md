@@ -42,8 +42,17 @@ and a load closure that solves `h` from
 
 so the Carnot sweep runs at fixed activity rather than an arbitrary hand-tuned field.
 
+The current single-GPU model also applies a first-order compute-memory
+closure: memory-hierarchy occupancy from `Z_memory` is turned into a
+`memory_feed_efficiency(beta)` factor that down-weights delivered useful work
+when execution spills into hotter levels.
+
 Current status:
 - Single-GPU `E_in - h W_hw` model and fixed-activity closure are implemented.
+- A first compute-memory feedability closure is implemented in the
+  single-GPU path.
+- The compiler/search layer now uses an architecture-facing proxy score
+  rather than a pure "expressiveness" heuristic.
 - Multi-GPU still uses a legacy waste-based proxy and needs the same `<W_hw>/<E_in>` refactor.
 - Recent theory changes and experiment notes are tracked in [`experimental_log.md`](experimental_log.md).
 

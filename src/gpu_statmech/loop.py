@@ -5,7 +5,7 @@ Implements the closed-loop search over kernel architectures described in
 the project brief:
 
   1. Oracle proposes a batch of N kernel architectures.
-  2. Compiler scores each: η_hw, expressiveness, waste decomposition.
+  2. Compiler scores each: η_hw, architecture alignment, waste decomposition.
   3. Proposals above the η threshold are retained as Pareto candidates.
   4. The Pareto frontier is updated over all accumulated proposals.
   5. Physics-grounded feedback is computed and fed back to the oracle.
@@ -111,7 +111,7 @@ class LoopState:
     best_eta:
         Highest η_hw / η_hw,max seen so far.
     best_expressiveness:
-        Highest expressiveness score seen so far.
+        Highest architecture-facing proxy score seen so far.
     best_combined:
         Highest combined score (η + expressiveness) seen so far.
     converged:

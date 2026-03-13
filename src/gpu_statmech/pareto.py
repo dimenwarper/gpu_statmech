@@ -4,7 +4,8 @@ Pareto frontier utilities for the architecture search optimisation loop (Phase 3
 The optimisation loop maximises two objectives simultaneously:
 
   1. **η_hw / η_hw,max**  (thermodynamic efficiency, from Carnot checker)
-  2. **expressiveness**   (proxy representational power, from compiler)
+  2. **expressiveness**   (legacy field name for the architecture-facing
+     proxy score from the compiler)
 
 A kernel A dominates kernel B if A is at least as good as B on *all*
 objectives and strictly better on *at least one*.  The Pareto frontier is

@@ -28,6 +28,8 @@ from gpu_statmech.partition_function import (
     gpu_partition_function,
     log_gpu_partition_function,
     log_z_compute,
+    memory_feed_efficiency,
+    memory_level_occupancies,
     mean_compute_activity,
     mean_warp_activity,
     mean_warp_input_energy,
@@ -96,6 +98,15 @@ class TestZWarp:
         work_field = solve_work_field(beta, target, H100_SM_CONFIG, hbm_bw)
         activity = mean_compute_activity(beta, H100_SM_CONFIG, hbm_bw, work_field=work_field)
         assert activity == pytest.approx(target, abs=1e-4)
+
+    def test_memory_level_occupancies_in_unit_interval(self):
+        occ = memory_level_occupancies(1.0)
+        assert set(occ) == {lvl.name for lvl in H100_MEMORY_LEVELS}
+        assert all(0.0 <= v <= 1.0 for v in occ.values())
+
+    def test_memory_feed_efficiency_in_unit_interval(self):
+        eff = memory_feed_efficiency(1.0)
+        assert 0.0 <= eff <= 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +286,7 @@ class TestThermodynamicQuantities:
         assert state.mean_activity == pytest.approx(target, abs=1e-4)
         assert math.isfinite(state.work_field)
         assert state.target_activity == pytest.approx(target)
+        assert 0.0 <= state.memory_feed_efficiency <= 1.0 + 1e-6
 
     def test_consistency_across_beta(self):
         # As β increases (cooling), mean_waste should not increase

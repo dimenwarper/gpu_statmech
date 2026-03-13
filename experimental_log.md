@@ -38,3 +38,16 @@
 - Updated `experiments/theoretical_calculations/02_memory_hierarchy.py` to remove the misleading literal reuse-count claim and to keep the roofline plot in bytes/cycle, matching the partition-function units.
 - Updated `experiments/theoretical_calculations/03_scaling_efficiency.py` to label the current multi-GPU path honestly as a legacy topology proxy rather than a timing-accurate overlap model.
 - Re-ran experiments 01-03 with `uv run --with matplotlib python ...` to refresh their figures and outputs.
+
+### Compute-memory closure and search objective
+
+- Added a first-order compute-memory closure in `partition_function.py`:
+  - `memory_level_occupancies(beta, ...)` computes exact occupancy marginals from the transfer-matrix chain.
+  - `memory_feed_efficiency(beta, ...)` converts warm-level occupancy into a feedability factor in `[0, 1]`.
+  - the single-GPU path now scales delivered useful work by this feedability factor and stores it on `ThermodynamicState`.
+- Added an architecture-facing search objective in `compiler.py` by upgrading the old expressiveness heuristic to reward:
+  - tensor-core use
+  - roofline-saturating arithmetic intensity
+  - locality/feedability (coalescing, reuse, low redundant movement)
+  - occupancy
+- Re-ran experiment 01 after the closure; at `target_activity = 0.20` the reported single-GPU limit dropped from `30.95%` to `16.46%`, which is directionally consistent with the missing memory coupling being restored.

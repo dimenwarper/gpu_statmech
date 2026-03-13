@@ -1,12 +1,12 @@
 """
-KernelProposal → KernelSpec compiler and thermodynamic scorer (Phase 2).
+KernelProposal → KernelSpec compiler and architecture-facing scorer (Phase 2).
 
 This module bridges the oracle (which speaks in high-level kernel design
 parameters) and the Carnot-optimality checker (which operates on the
-``KernelSpec`` dataclass).  It also computes an *expressiveness proxy
-score* — a hardware-grounded estimate of a kernel's representational power
-— so that the optimisation loop can evaluate proposals before committing
-to expensive full training runs.
+``KernelSpec`` dataclass).  It also computes an architecture-facing proxy
+score — a hardware-grounded estimate of how well a proposal aligns with the
+GPU efficiency envelope — so that the optimisation loop can rank proposals
+before expensive full training runs.
 
 Compilation pipeline
 --------------------
@@ -20,7 +20,7 @@ Compilation pipeline
        │
        ├──► warp_occupancy()      (H100 occupancy model)
        ├──► working_set()         (register file + SMEM footprint)
-       └──► expressiveness_score()
+       └──► architecture_score()
 
 Occupancy model
 ~~~~~~~~~~~~~~~
@@ -40,19 +40,24 @@ Given a ``KernelProposal``:
                                  max_warps_per_sm)
   5. warp_occupancy        = actual_warps / max_warps_per_sm
 
-Expressiveness proxy score
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-A hardware-grounded proxy for the downstream representational power of a
-kernel design, inspired by the roofline model and tensor-core throughput
-theory.  It is NOT a loss function — it is a relative ranking signal.
+Architecture-facing proxy score
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A hardware-grounded proxy for how well a kernel proposal matches the GPU's
+preferred operating regime.  It rewards:
 
-  expr = w_tc  × tc_util
+  - tensor-core use
+  - arithmetic intensity above the roofline ridge
+  - feedable/local memory traffic (coalescing, reuse, low redundant movement)
+  - sufficient occupancy
+
+  arch = w_tc  × tc_util
        + w_ai  × sat(AI / ridge)
-       + w_acc × access_score(pattern)
+       + w_acc × locality_score
        + w_occ × warp_occupancy
 
   where sat(x) = min(x, 1) clips the AI benefit at the roofline ridge
-  (beyond the ridge, expressiveness is not further constrained by memory).
+  (beyond the ridge, the kernel is no longer HBM-bound in the first-order
+  model).
 
 Default weights:  w_tc=0.35, w_ai=0.35, w_acc=0.20, w_occ=0.10.
 
@@ -217,18 +222,18 @@ def expressiveness_score(
     w_occ: float = 0.10,
 ) -> float:
     """
-    Compute the expressiveness proxy score for a ``KernelProposal``.
+    Compute the architecture-facing proxy score for a ``KernelProposal``.
 
     The score is a weighted sum of four hardware-grounded sub-scores, each
     ∈ [0, 1]:
 
-      expr = w_tc  × tc_util
+      arch = w_tc  × tc_util
            + w_ai  × min(AI / ridge, 1)
-           + w_acc × access_efficiency(pattern)
+           + w_acc × locality_and_feedability
            + w_occ × warp_occupancy
 
-    Higher → the kernel is predicted to have more representational power
-    per unit of hardware resource.
+    Higher → the proposal is predicted to use the hardware in a more
+    architecture-aligned way.
 
     Parameters
     ----------
@@ -244,7 +249,7 @@ def expressiveness_score(
     Returns
     -------
     float
-        Expressiveness score ∈ [0, 1].
+        Architecture-facing score ∈ [0, 1].
     """
     if sm_config is None:
         sm_config = H100_SM_CONFIG
@@ -258,14 +263,44 @@ def expressiveness_score(
     ridge = max(carnot_limit.roofline_intensity, 1e-9)
     s_ai = float(min(proposal.arithmetic_intensity / ridge, 1.0))
 
-    # Memory access pattern sub-score
+    # Memory-locality sub-score: combine coalescing, reuse, and low
+    # unnecessary movement into one architecture-facing feedability signal.
     s_acc = ACCESS_PATTERNS.get(proposal.memory_access_pattern, 0.0)
+    smem_reuse = max(proposal.reuse_factors.get("smem", 1.0), 1.0)
+    l2_reuse = max(proposal.reuse_factors.get("L2", 1.0), 1.0)
+    s_reuse_smem = float(np.clip(np.log2(1.0 + smem_reuse) / 6.0, 0.0, 1.0))
+    s_reuse_l2 = float(np.clip(np.log2(1.0 + l2_reuse) / 5.0, 0.0, 1.0))
+    s_move = float(np.clip(1.0 - proposal.unnecessary_data_movement, 0.0, 1.0))
+    s_locality = 0.45 * s_acc + 0.25 * s_reuse_smem + 0.20 * s_reuse_l2 + 0.10 * s_move
 
     # Warp occupancy sub-score
     s_occ = warp_occupancy(proposal, sm_config, memory_levels)
 
-    score = w_tc * s_tc + w_ai * s_ai + w_acc * s_acc + w_occ * s_occ
+    score = w_tc * s_tc + w_ai * s_ai + w_acc * s_locality + w_occ * s_occ
     return float(np.clip(score, 0.0, 1.0))
+
+
+def architecture_score(
+    proposal: KernelProposal,
+    carnot_limit: CarnotLimit,
+    sm_config: SMConfig | None = None,
+    memory_levels: list[MemoryLevel] | None = None,
+    w_tc: float = 0.35,
+    w_ai: float = 0.35,
+    w_acc: float = 0.20,
+    w_occ: float = 0.10,
+) -> float:
+    """Named alias for the architecture-facing search objective."""
+    return expressiveness_score(
+        proposal,
+        carnot_limit,
+        sm_config=sm_config,
+        memory_levels=memory_levels,
+        w_tc=w_tc,
+        w_ai=w_ai,
+        w_acc=w_acc,
+        w_occ=w_occ,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +321,7 @@ class CompiledKernel:
     optimality_report:
         Per-condition Carnot-optimality check results.
     expressiveness_score:
-        Hardware-grounded proxy for representational power ∈ [0, 1].
+        Legacy name for the architecture-facing proxy score ∈ [0, 1].
     thermo_score:
         Achieved η_hw / η_hw,max ∈ [0, 1] from the optimality report.
     combined_score:
@@ -303,6 +338,11 @@ class CompiledKernel:
     def combined_score(self) -> float:
         """Sum of thermodynamic and expressiveness scores ∈ [0, 2]."""
         return self.thermo_score + self.expressiveness_score
+
+    @property
+    def architecture_score(self) -> float:
+        """Architecture-facing proxy score used by the search loop."""
+        return self.expressiveness_score
 
     @property
     def is_carnot_optimal(self) -> bool:

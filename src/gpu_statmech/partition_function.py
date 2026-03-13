@@ -551,6 +551,7 @@ def solve_work_field(
     sm_config: SMConfig,
     hbm_bandwidth_bytes_per_cycle: float,
     apply_bandwidth_correction: bool = True,
+    memory_feed_factor: float = 1.0,
     tol: float = 1e-6,
     max_iter: int = 64,
 ) -> float:
@@ -572,7 +573,7 @@ def solve_work_field(
             sm_config,
             hbm_bandwidth_bytes_per_cycle,
             apply_bandwidth_correction=apply_bandwidth_correction,
-            work_field=work_field,
+            work_field=work_field * memory_feed_factor,
         )
 
     lo = -4.0
@@ -624,6 +625,7 @@ def _resolve_operating_work_field(
     work_field: float = 0.0,
     activity_potential: float | None = None,
     target_activity: float | None = None,
+    memory_feed_factor: float = 1.0,
 ) -> float:
     """
     Resolve the operating work field for a state.
@@ -637,6 +639,7 @@ def _resolve_operating_work_field(
             target_activity,
             sm_config,
             hbm_bandwidth_bytes_per_cycle,
+            memory_feed_factor=memory_feed_factor,
         )
     return _resolve_work_field(work_field, activity_potential)
 
@@ -715,6 +718,84 @@ def z_memory(
         vec = T.T @ vec   # sum over the "from" states
 
     return float(vec.sum())
+
+
+def memory_level_occupancies(
+    beta: float,
+    memory_levels: list[MemoryLevel] | None = None,
+    n_bins: int = 64,
+) -> dict[str, float]:
+    """
+    Return the expected occupancy fraction at each memory level.
+
+    This is computed exactly from the transfer-matrix chain via forward/backward
+    marginals over the discretised occupancy states.
+    """
+    if memory_levels is None:
+        memory_levels = H100_MEMORY_LEVELS
+
+    n_levels = len(memory_levels)
+    if n_levels == 0:
+        return {}
+
+    if n_levels == 1:
+        u = np.linspace(0.0, 1.0, n_bins)
+        return {memory_levels[0].name: float(u.mean())}
+
+    transfers = [
+        _transfer_matrix(memory_levels[i], memory_levels[i + 1], beta, n_bins)
+        for i in range(n_levels - 1)
+    ]
+    u = np.linspace(0.0, 1.0, n_bins, dtype=np.float64)
+
+    forward: list[NDArray[np.float64]] = [np.ones(n_bins, dtype=np.float64)]
+    for T in transfers:
+        forward.append(T.T @ forward[-1])
+
+    backward: list[NDArray[np.float64]] = [np.ones(n_bins, dtype=np.float64) for _ in range(n_levels)]
+    for i in range(n_levels - 2, -1, -1):
+        backward[i] = transfers[i] @ backward[i + 1]
+
+    occupancies: dict[str, float] = {}
+    for i, level in enumerate(memory_levels):
+        marginal = forward[i] * backward[i]
+        total = max(float(marginal.sum()), 1e-300)
+        occupancies[level.name] = float(np.dot(marginal, u) / total)
+    return occupancies
+
+
+def memory_feed_efficiency(
+    beta: float,
+    memory_levels: list[MemoryLevel] | None = None,
+    n_bins: int = 64,
+) -> float:
+    """
+    First-order memory-to-compute closure.
+
+    Interprets occupancy of warmer levels as evidence that useful work is being
+    fed from farther, hotter storage.  The returned factor lies in [0, 1]:
+
+      1.0 -> working set remains in cold levels (registers / SMEM)
+      0.0 -> the hierarchy is dominated by hot-level residency (HBM-heavy)
+    """
+    if memory_levels is None:
+        memory_levels = H100_MEMORY_LEVELS
+    if len(memory_levels) <= 1:
+        return 1.0
+
+    occupancies = memory_level_occupancies(beta, memory_levels, n_bins=n_bins)
+    hottest_latency = max(memory_levels[-1].latency_cycles, 1.0)
+
+    hot_pressure = 0.0
+    total_weight = 0.0
+    for level in memory_levels[1:]:
+        weight = min(level.latency_cycles / hottest_latency, 1.0)
+        hot_pressure += weight * occupancies.get(level.name, 0.0)
+        total_weight += weight
+
+    if total_weight <= 1e-12:
+        return 1.0
+    return float(np.clip(1.0 - hot_pressure / total_weight, 0.0, 1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +878,7 @@ class ThermodynamicState:
     beta: float
     log_Z: float
     work_field: float
+    memory_feed_efficiency: float
 
     # Primary quantities (all intensive, normalised per warp DOF)
     free_energy: float           # F = -kT ln Z  (in units of kT)
@@ -843,6 +925,7 @@ def log_gpu_partition_function(
         comm_edges = []
 
     hbm_bw = memory_levels[-1].bandwidth_bytes_per_cycle
+    feed_eff = memory_feed_efficiency(beta, memory_levels, n_bins=n_bins)
     resolved_work_field = _resolve_operating_work_field(
         beta,
         sm_config,
@@ -850,12 +933,14 @@ def log_gpu_partition_function(
         work_field=work_field,
         activity_potential=activity_potential,
         target_activity=target_activity,
+        memory_feed_factor=feed_eff,
     )
+    effective_work_field = resolved_work_field * feed_eff
     log_zc = log_z_compute(
         beta,
         sm_config,
         hbm_bw,
-        work_field=resolved_work_field,
+        work_field=effective_work_field,
     )
     log_zm = math.log(max(z_memory(beta, memory_levels, n_bins), 1e-300))
     log_zk = math.log(max(z_comm(beta, comm_edges, sm_config.n_sm), 1e-300))
@@ -918,6 +1003,7 @@ def thermodynamic_quantities(
         comm_edges = []
 
     hbm_bw = memory_levels[-1].bandwidth_bytes_per_cycle
+    feed_eff = memory_feed_efficiency(beta, memory_levels, n_bins=n_bins)
     resolved_work_field = _resolve_operating_work_field(
         beta,
         sm_config,
@@ -925,7 +1011,9 @@ def thermodynamic_quantities(
         work_field=work_field,
         activity_potential=activity_potential,
         target_activity=target_activity,
+        memory_feed_factor=feed_eff,
     )
+    effective_work_field = resolved_work_field * feed_eff
 
     def ln_z(b: float) -> float:
         return log_gpu_partition_function(
@@ -935,14 +1023,25 @@ def thermodynamic_quantities(
             comm_edges,
             n_bins,
             work_field=resolved_work_field,
+            target_activity=target_activity,
         )
 
     def ln_z_component(b: float) -> tuple[float, float, float]:
+        feed_eff_b = memory_feed_efficiency(b, memory_levels, n_bins=n_bins)
+        resolved_work_field_b = _resolve_operating_work_field(
+            b,
+            sm_config,
+            hbm_bw,
+            work_field=work_field,
+            activity_potential=activity_potential,
+            target_activity=target_activity,
+            memory_feed_factor=feed_eff_b,
+        )
         log_zc = log_z_compute(
             b,
             sm_config,
             hbm_bw,
-            work_field=resolved_work_field,
+            work_field=resolved_work_field_b * feed_eff_b,
         )
         log_zm = math.log(max(z_memory(b, memory_levels, n_bins), 1e-300))
         log_zk = math.log(max(z_comm(b, comm_edges, sm_config.n_sm), 1e-300))
@@ -978,14 +1077,15 @@ def thermodynamic_quantities(
         beta,
         sm_config,
         hbm_bw,
-        work_field=resolved_work_field,
+        work_field=effective_work_field,
     )
-    mean_compute_work = mean_compute_useful_work(
+    mean_compute_work_raw = mean_compute_useful_work(
         beta,
         sm_config,
         hbm_bw,
-        work_field=resolved_work_field,
+        work_field=effective_work_field,
     )
+    mean_compute_work = feed_eff * mean_compute_work_raw
     mean_input_energy = mean_compute_input + mean_memory_input_energy + mean_comm_input_energy
     mean_useful_work = mean_compute_work
     mean_waste = max(mean_input_energy - mean_useful_work, 0.0)
@@ -993,7 +1093,7 @@ def thermodynamic_quantities(
         beta,
         sm_config,
         hbm_bw,
-        work_field=resolved_work_field,
+        work_field=effective_work_field,
     )
     entropy = beta * (mean_effective_energy - free_energy)
 
@@ -1001,6 +1101,7 @@ def thermodynamic_quantities(
         beta=beta,
         log_Z=lz,
         work_field=resolved_work_field,
+        memory_feed_efficiency=feed_eff,
         free_energy=free_energy,
         mean_effective_energy=mean_effective_energy,
         mean_input_energy=mean_input_energy,

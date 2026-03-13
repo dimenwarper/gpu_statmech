@@ -154,6 +154,16 @@ class TestExpressivenessScore:
         p_hi = _make_proposal(arithmetic_intensity=100.0, reuse_factors={"smem": 100.0, "L2": 50.0, "HBM": 100.0})
         assert expressiveness_score(p_hi, carnot_limit) > expressiveness_score(p_lo, carnot_limit)
 
+    def test_low_reuse_lowers_score(self, carnot_limit):
+        p_lo = _make_proposal(reuse_factors={"smem": 1.0, "L2": 1.0, "HBM": 1.0})
+        p_hi = _make_proposal(reuse_factors={"smem": 64.0, "L2": 16.0, "HBM": 16.0})
+        assert expressiveness_score(p_hi, carnot_limit) > expressiveness_score(p_lo, carnot_limit)
+
+    def test_unnecessary_movement_lowers_score(self, carnot_limit):
+        p_clean = _make_proposal(unnecessary_data_movement=0.0)
+        p_dirty = _make_proposal(unnecessary_data_movement=0.8)
+        assert expressiveness_score(p_clean, carnot_limit) > expressiveness_score(p_dirty, carnot_limit)
+
     def test_saturates_above_ridge(self, carnot_limit):
         """AI score should saturate once AI >> ridge."""
         ridge = carnot_limit.roofline_intensity
@@ -206,6 +216,11 @@ class TestKernelCompilerCompile:
         p = _make_proposal()
         ck = compiler.compile(p)
         assert ck.combined_score == pytest.approx(ck.thermo_score + ck.expressiveness_score)
+
+    def test_architecture_score_alias(self, compiler):
+        p = _make_proposal()
+        ck = compiler.compile(p)
+        assert ck.architecture_score == pytest.approx(ck.expressiveness_score)
 
     def test_is_carnot_optimal_property(self, compiler):
         p = _make_proposal()
