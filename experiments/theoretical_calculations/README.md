@@ -146,11 +146,11 @@ LLaMA-7B: 6 of 16 configs are Pareto-efficient; DP16+TP4 wins on η_multi.
 ## Running all experiments
 
 ```bash
-uv run python experiments/theoretical_calculations/01_carnot_curve.py
-uv run python experiments/theoretical_calculations/02_memory_hierarchy.py
-uv run python experiments/theoretical_calculations/03_scaling_efficiency.py
-uv run python experiments/theoretical_calculations/04_resonance.py
-uv run python experiments/theoretical_calculations/05_parallelism_optimizer.py
+uv run --with matplotlib python experiments/theoretical_calculations/01_carnot_curve.py
+uv run --with matplotlib python experiments/theoretical_calculations/02_memory_hierarchy.py
+uv run --with matplotlib python experiments/theoretical_calculations/03_scaling_efficiency.py
+uv run --with matplotlib python experiments/theoretical_calculations/04_resonance.py
+uv run --with matplotlib python experiments/theoretical_calculations/05_parallelism_optimizer.py
 ```
 
 Figures are saved to [`figures/`](figures/).
