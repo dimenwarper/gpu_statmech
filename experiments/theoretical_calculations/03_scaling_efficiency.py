@@ -139,7 +139,7 @@ for name, r in results.items():
             color=COLORS[name], marker=MARKERS[name], lw=2, ms=7, label=name)
 ax.set_xlabel("Number of GPUs", fontsize=11)
 ax.set_ylabel("η_multi,max  (%)", fontsize=11)
-ax.set_title("Multi-GPU Ceiling Proxy  η_multi,max(n)", fontsize=12)
+ax.set_title("Multi-GPU Ceiling  η_multi,max(n)", fontsize=12)
 ax.set_xscale("log", base=2)
 ax.set_xticks(n_gpu_values)
 ax.set_xticklabels(n_gpu_values)
