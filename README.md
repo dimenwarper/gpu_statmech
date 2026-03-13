@@ -10,6 +10,13 @@ Full project brief: [`docs/project_brief.md`](docs/project_brief.md)
 
 A GPU is a thermodynamic engine. Like Carnot's heat engine, it has a theoretical maximum efficiency derivable from first principles. This project derives that limit and uses it to design neural architectures that operate near it.
 
+We treat GPU execution as a statistical physical system over hardware
+microstates. A kernel induces a distribution over scheduler, memory, and
+communication states. States that deliver more useful computation per unit
+input cost dominate the ensemble. That gives us a first-principles efficiency
+objective for designing kernels and models that are physically aligned with
+the GPU.
+
 Overall efficiency decomposes into two layers:
 
 ```
