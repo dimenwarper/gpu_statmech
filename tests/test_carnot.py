@@ -10,6 +10,8 @@ Key invariants:
   - η_hw_fraction is monotone in violation severity
 """
 
+import math
+
 import pytest
 
 from gpu_statmech.carnot import (
@@ -58,6 +60,11 @@ class TestDeriveCarnotLimit:
     def test_min_reuse_factors_positive(self, limit):
         for name, reuse in limit.min_reuse_factors.items():
             assert reuse > 0.0, f"Reuse factor for {name} should be positive"
+
+    def test_load_closure_metadata_present(self, limit):
+        assert limit.target_activity is not None
+        assert math.isfinite(limit.work_field_optimal)
+        assert limit.thermo_state.mean_activity == pytest.approx(limit.target_activity, abs=1e-4)
 
 
 # ---------------------------------------------------------------------------

@@ -545,6 +545,102 @@ def mean_compute_useful_work(
     )
 
 
+def solve_work_field(
+    beta: float,
+    target_activity: float,
+    sm_config: SMConfig,
+    hbm_bandwidth_bytes_per_cycle: float,
+    apply_bandwidth_correction: bool = True,
+    tol: float = 1e-6,
+    max_iter: int = 64,
+) -> float:
+    """
+    Solve for the useful-work field h that yields a target compute activity.
+
+    This closes the ensemble with the constraint:
+
+        <A>(beta, h) = target_activity
+
+    using a monotone bisection solve over h.
+    """
+    if not 0.0 <= target_activity <= 1.0:
+        raise ValueError("target_activity must be in [0, 1]")
+
+    def activity_at(work_field: float) -> float:
+        return mean_compute_activity(
+            beta,
+            sm_config,
+            hbm_bandwidth_bytes_per_cycle,
+            apply_bandwidth_correction=apply_bandwidth_correction,
+            work_field=work_field,
+        )
+
+    lo = -4.0
+    hi = 4.0
+    act_lo = activity_at(lo)
+    act_hi = activity_at(hi)
+
+    for _ in range(24):
+        if act_lo <= target_activity <= act_hi:
+            break
+        if target_activity < act_lo:
+            hi = lo
+            act_hi = act_lo
+            lo *= 2.0
+            act_lo = activity_at(lo)
+        else:
+            lo = hi
+            act_lo = act_hi
+            hi *= 2.0
+            act_hi = activity_at(hi)
+    else:
+        raise ValueError(
+            "target_activity is outside the attainable range "
+            f"[{act_lo:.6f}, {act_hi:.6f}] at beta={beta:.6f}"
+        )
+
+    if abs(act_lo - target_activity) <= tol:
+        return lo
+    if abs(act_hi - target_activity) <= tol:
+        return hi
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        act_mid = activity_at(mid)
+        if abs(act_mid - target_activity) <= tol:
+            return mid
+        if act_mid < target_activity:
+            lo = mid
+        else:
+            hi = mid
+
+    return 0.5 * (lo + hi)
+
+
+def _resolve_operating_work_field(
+    beta: float,
+    sm_config: SMConfig,
+    hbm_bandwidth_bytes_per_cycle: float,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+    target_activity: float | None = None,
+) -> float:
+    """
+    Resolve the operating work field for a state.
+
+    ``target_activity`` takes precedence and closes the ensemble by solving for
+    the field that yields the requested mean activity at the current β.
+    """
+    if target_activity is not None:
+        return solve_work_field(
+            beta,
+            target_activity,
+            sm_config,
+            hbm_bandwidth_bytes_per_cycle,
+        )
+    return _resolve_work_field(work_field, activity_potential)
+
+
 # ---------------------------------------------------------------------------
 # Z_memory  (exact transfer-matrix over the 4-level 1-D chain)
 # ---------------------------------------------------------------------------
@@ -700,6 +796,7 @@ class ThermodynamicState:
     """All thermodynamic quantities derived from Z at a given β."""
     beta: float
     log_Z: float
+    work_field: float
 
     # Primary quantities (all intensive, normalised per warp DOF)
     free_energy: float           # F = -kT ln Z  (in units of kT)
@@ -708,6 +805,7 @@ class ThermodynamicState:
     mean_useful_work: float      # <W_hw>
     mean_waste: float            # <E_in - W_hw>
     mean_activity: float         # productive issue activity per warp-cycle
+    target_activity: float | None
     entropy: float               # S = β(<E_eff> - F)  [dimensionless]
     specific_heat: float         # Cv = β² d<E_eff>/dβ  [dimensionless]
 
@@ -730,6 +828,7 @@ def log_gpu_partition_function(
     n_bins: int = 64,
     work_field: float = 0.0,
     activity_potential: float | None = None,
+    target_activity: float | None = None,
 ) -> float:
     """
     ln Z(β) = ln Z_compute(β) + ln Z_memory(β) + ln Z_comm(β)
@@ -743,8 +842,15 @@ def log_gpu_partition_function(
     if comm_edges is None:
         comm_edges = []
 
-    resolved_work_field = _resolve_work_field(work_field, activity_potential)
     hbm_bw = memory_levels[-1].bandwidth_bytes_per_cycle
+    resolved_work_field = _resolve_operating_work_field(
+        beta,
+        sm_config,
+        hbm_bw,
+        work_field=work_field,
+        activity_potential=activity_potential,
+        target_activity=target_activity,
+    )
     log_zc = log_z_compute(
         beta,
         sm_config,
@@ -764,6 +870,7 @@ def gpu_partition_function(
     n_bins: int = 64,
     work_field: float = 0.0,
     activity_potential: float | None = None,
+    target_activity: float | None = None,
 ) -> float:
     """
     Z(β) = exp(ln Z_compute + ln Z_memory + ln Z_comm).
@@ -779,6 +886,7 @@ def gpu_partition_function(
         n_bins,
         work_field=work_field,
         activity_potential=activity_potential,
+        target_activity=target_activity,
     ))
 
 
@@ -791,6 +899,7 @@ def thermodynamic_quantities(
     d_beta: float = 1e-4,
     work_field: float = 0.0,
     activity_potential: float | None = None,
+    target_activity: float | None = None,
 ) -> ThermodynamicState:
     """
     Compute all thermodynamic quantities at inverse temperature β by finite
@@ -808,8 +917,15 @@ def thermodynamic_quantities(
     if comm_edges is None:
         comm_edges = []
 
-    resolved_work_field = _resolve_work_field(work_field, activity_potential)
     hbm_bw = memory_levels[-1].bandwidth_bytes_per_cycle
+    resolved_work_field = _resolve_operating_work_field(
+        beta,
+        sm_config,
+        hbm_bw,
+        work_field=work_field,
+        activity_potential=activity_potential,
+        target_activity=target_activity,
+    )
 
     def ln_z(b: float) -> float:
         return log_gpu_partition_function(
@@ -884,12 +1000,14 @@ def thermodynamic_quantities(
     return ThermodynamicState(
         beta=beta,
         log_Z=lz,
+        work_field=resolved_work_field,
         free_energy=free_energy,
         mean_effective_energy=mean_effective_energy,
         mean_input_energy=mean_input_energy,
         mean_useful_work=mean_useful_work,
         mean_waste=mean_waste,
         mean_activity=mean_activity,
+        target_activity=target_activity,
         entropy=entropy,
         specific_heat=specific_heat,
         log_Z_compute=lzc,
@@ -906,6 +1024,7 @@ def beta_sweep(
     n_bins: int = 64,
     work_field: float = 0.0,
     activity_potential: float | None = None,
+    target_activity: float | None = None,
 ) -> list[ThermodynamicState]:
     """Compute thermodynamic quantities over a range of β values."""
     return [
@@ -917,6 +1036,7 @@ def beta_sweep(
             n_bins,
             work_field=work_field,
             activity_potential=activity_potential,
+            target_activity=target_activity,
         )
         for b in betas
     ]

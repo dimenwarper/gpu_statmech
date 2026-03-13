@@ -22,6 +22,31 @@ Overall efficiency decomposes into two layers:
 
 The simulator lives in the sister repo [`gpusim`](https://github.com/dimenwarper/gpusim) (Rust + PyO3). This repo is the analysis and search layer on top of it.
 
+Current single-GPU theory uses the fixed-load ensemble
+
+```
+p(sigma) ∝ exp[-beta (E_in(sigma) - h W_hw(sigma))]
+```
+
+with hardware efficiency
+
+```
+eta_hw = <W_hw> / <E_in>
+```
+
+and a load closure that solves `h` from
+
+```
+<A>(beta, h) = target_activity
+```
+
+so the Carnot sweep runs at fixed activity rather than an arbitrary hand-tuned field.
+
+Current status:
+- Single-GPU `E_in - h W_hw` model and fixed-activity closure are implemented.
+- Multi-GPU still uses a legacy waste-based proxy and needs the same `<W_hw>/<E_in>` refactor.
+- Recent theory changes and experiment notes are tracked in [`experimental_log.md`](experimental_log.md).
+
 ---
 
 ## Plan of Attack
@@ -42,7 +67,7 @@ Z ≈ Z_compute × Z_memory × Z_comm
 | Z_comm | Mean-field on cluster graph with topology-dependent J_gh | NVLink J≈0.1, IB J≈5.0 |
 | Validation | Empirical density-of-states histogram from simulator traces | Ground truth for calibration of the above |
 
-From Z we derive F, S, ⟨E⟩, C_V and — crucially — η_hw,max as a function of hardware parameters (SM count, memory capacities, bandwidths).
+From Z we derive `F`, `S`, `⟨E_eff⟩`, `⟨E_in⟩`, `⟨W_hw⟩`, `C_V`, and — crucially — `η_hw,max` as a function of hardware parameters (SM count, memory capacities, bandwidths).
 
 **Carnot-optimal conditions (necessary for η → η_max):**
 - Arithmetic intensity ≥ B_HBM / peak_FLOPS (roofline, but *derived* not assumed)
@@ -82,6 +107,8 @@ Wraps the gpusim Python API and adds:
   - DP → ferromagnetic, TP → antiferromagnetic, PP → domain wall, EP → spin-glass
 - Resonance condition: η_overlap = T_overlapped / max(T_compute, T_comm)
 - Parallelism optimizer: enumerate (dp, tp, pp, ep, cp) configs, score each by η_multi
+
+Current caveat: the multi-GPU path still ranks topologies with a waste-based communication proxy. The single-GPU `E_in - h W_hw` refactor has not yet been propagated through `multi_gpu.py`.
 
 **Deliverables:** `src/gpu_statmech/multi_gpu.py`, `src/gpu_statmech/parallelism.py`
 
@@ -139,6 +166,7 @@ Narrative: derive the GPU Carnot limit → characterise Carnot-optimal computati
 
 ```
 gpu_statmech/
+├── experimental_log.md        # Dated notes on theory changes and experiment results
 ├── docs/
 │   └── project_brief.md       # Full project brief
 ├── src/gpu_statmech/

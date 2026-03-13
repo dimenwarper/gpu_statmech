@@ -48,6 +48,8 @@ class CarnotLimit:
     """
     eta_hw_max: float                        # ∈ [0, 1]
     beta_optimal: float                      # β at which η_hw,max is achieved
+    work_field_optimal: float                # h that realises the optimal operating point
+    target_activity: float | None            # fixed-load closure, if used
     T_eff: dict[str, float]                  # effective temperatures per memory level
     roofline_intensity: float                # min arithmetic intensity (FLOP/byte)
     min_reuse_factors: dict[str, float]      # min data reuse per level
@@ -94,8 +96,9 @@ def derive_carnot_limit(
     beta_max: float = 10.0,
     n_beta: int = 200,
     n_bins: int = 64,
-    work_field: float = 1.0,
+    work_field: float | None = None,
     activity_potential: float | None = None,
+    target_activity: float | None = None,
 ) -> CarnotLimit:
     """
     Derive η_hw,max from the partition function.
@@ -104,6 +107,11 @@ def derive_carnot_limit(
       η_hw(β, h) = <W_hw(β, h)> / <E_in(β, h)>
 
     where h is the useful-work field conjugate to productive hardware work.
+    If ``target_activity`` is provided, h is solved from:
+
+      <A>(β, h) = target_activity
+
+    so the Carnot sweep operates at fixed load rather than fixed field.
 
     η_hw,max = max_β η_hw(β, h)
 
@@ -120,6 +128,9 @@ def derive_carnot_limit(
     if memory_levels is None:
         memory_levels = H100_MEMORY_LEVELS
 
+    if target_activity is None and work_field is None and activity_potential is None:
+        target_activity = 0.20
+
     resolved_work_field = activity_potential if activity_potential is not None else work_field
     betas = np.linspace(beta_min, beta_max, n_beta).tolist()
     states = beta_sweep(
@@ -127,7 +138,8 @@ def derive_carnot_limit(
         sm_config,
         memory_levels,
         n_bins=n_bins,
-        work_field=resolved_work_field,
+        work_field=resolved_work_field or 0.0,
+        target_activity=target_activity,
     )
 
     etas = [max(0.0, min(1.0, s.eta_hw)) for s in states]
@@ -173,6 +185,8 @@ def derive_carnot_limit(
     return CarnotLimit(
         eta_hw_max=eta_max,
         beta_optimal=beta_opt,
+        work_field_optimal=best_state.work_field,
+        target_activity=target_activity,
         T_eff=T_eff,
         roofline_intensity=ai_min,
         min_reuse_factors=min_reuse,

@@ -28,9 +28,11 @@ from gpu_statmech.partition_function import (
     gpu_partition_function,
     log_gpu_partition_function,
     log_z_compute,
+    mean_compute_activity,
     mean_warp_activity,
     mean_warp_input_energy,
     mean_warp_useful_work,
+    solve_work_field,
     thermodynamic_quantities,
     z_comm,
     z_compute,
@@ -86,6 +88,14 @@ class TestZWarp:
         low = mean_warp_activity(beta, activity_potential=0.0)
         high = mean_warp_activity(beta, activity_potential=1.0)
         assert high >= low
+
+    def test_solve_work_field_hits_target_activity(self):
+        beta = 1.0
+        target = 0.2
+        hbm_bw = H100_MEMORY_LEVELS[-1].bandwidth_bytes_per_cycle
+        work_field = solve_work_field(beta, target, H100_SM_CONFIG, hbm_bw)
+        activity = mean_compute_activity(beta, H100_SM_CONFIG, hbm_bw, work_field=work_field)
+        assert activity == pytest.approx(target, abs=1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +268,13 @@ class TestThermodynamicQuantities:
         low = thermodynamic_quantities(beta=1.0, activity_potential=0.0)
         high = thermodynamic_quantities(beta=1.0, activity_potential=1.0)
         assert high.mean_activity >= low.mean_activity
+
+    def test_target_activity_closure_matches_requested_activity(self):
+        target = 0.2
+        state = thermodynamic_quantities(beta=1.0, target_activity=target)
+        assert state.mean_activity == pytest.approx(target, abs=1e-4)
+        assert math.isfinite(state.work_field)
+        assert state.target_activity == pytest.approx(target)
 
     def test_consistency_across_beta(self):
         # As β increases (cooling), mean_waste should not increase
