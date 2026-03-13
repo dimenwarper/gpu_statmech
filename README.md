@@ -20,7 +20,7 @@ Overall efficiency decomposes into two layers:
 - **η_task** — task efficiency: fraction of that computation that is *useful* for the downstream task
 - **η_max = η_hw,max × η_task,max** — the GPU Carnot limit
 
-The simulator lives in the sister repo [`../gpusim`](../gpusim) (Rust + PyO3). This repo is the analysis and search layer on top of it.
+The simulator lives in the sister repo [`gpusim`](https://github.com/dimenwarper/gpusim) (Rust + PyO3). This repo is the analysis and search layer on top of it.
 
 ---
 
