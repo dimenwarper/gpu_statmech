@@ -2,10 +2,9 @@
 GPU Carnot limit derivation and Carnot-optimal computation class.
 
 η_hw,max is derived from the partition function as the maximum fraction of
-input energy convertible to useful computation:
+input energy converted to useful computation:
 
-    η_hw,max = 1 - <E>_min / E_in,max
-             = 1 - (minimum achievable mean waste) / (total input energy)
+    η_hw,max = max_β <W_hw(β)> / <E_in(β)>
 
 The Carnot-optimal computation class is the set of kernels that saturate
 η_hw,max. Membership is checked via five necessary conditions derived from
@@ -95,17 +94,18 @@ def derive_carnot_limit(
     beta_max: float = 10.0,
     n_beta: int = 200,
     n_bins: int = 64,
+    work_field: float = 1.0,
+    activity_potential: float | None = None,
 ) -> CarnotLimit:
     """
     Derive η_hw,max from the partition function.
 
     Strategy:
-      η_hw(β) = 1 - <E(β)> / E_in,max
+      η_hw(β, h) = <W_hw(β, h)> / <E_in(β, h)>
 
-    where <E(β)> is the mean waste energy at inverse temperature β and
-    E_in,max is the maximum possible waste (all SMs idle, pure HBM traffic).
+    where h is the useful-work field conjugate to productive hardware work.
 
-    η_hw,max = max_β η_hw(β)
+    η_hw,max = max_β η_hw(β, h)
 
     The optimal β balances two competing effects:
       - High β (low T, lightly loaded): low waste per operation but also
@@ -120,12 +120,17 @@ def derive_carnot_limit(
     if memory_levels is None:
         memory_levels = H100_MEMORY_LEVELS
 
+    resolved_work_field = activity_potential if activity_potential is not None else work_field
     betas = np.linspace(beta_min, beta_max, n_beta).tolist()
-    states = beta_sweep(betas, sm_config, memory_levels, n_bins=n_bins)
+    states = beta_sweep(
+        betas,
+        sm_config,
+        memory_levels,
+        n_bins=n_bins,
+        work_field=resolved_work_field,
+    )
 
-    # η_hw(β) = 1 - <E(β)>
-    # <E> is already normalised to [0,1] waste fraction in our units.
-    etas = [1.0 - max(0.0, min(1.0, s.mean_waste)) for s in states]
+    etas = [max(0.0, min(1.0, s.eta_hw)) for s in states]
 
     best_idx = int(np.argmax(etas))
     best_state = states[best_idx]

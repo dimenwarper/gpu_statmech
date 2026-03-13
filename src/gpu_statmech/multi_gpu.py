@@ -554,7 +554,10 @@ def derive_multi_gpu_carnot_limit(
             best_state = state
             best_beta = b
 
-    best_eta = max(0.0, min(1.0, best_eta))
+    # Multi-GPU efficiency cannot exceed the best single-GPU operating point;
+    # enforce that ceiling explicitly because the topology model is still a
+    # coarse correction on top of the local partition function.
+    best_eta = max(0.0, min(best_eta, eta_hw_max_single, 1.0))
     assert best_state is not None
 
     # Communication overhead: edges as a fraction of total DOFs + edges

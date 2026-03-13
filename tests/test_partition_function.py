@@ -28,6 +28,9 @@ from gpu_statmech.partition_function import (
     gpu_partition_function,
     log_gpu_partition_function,
     log_z_compute,
+    mean_warp_activity,
+    mean_warp_input_energy,
+    mean_warp_useful_work,
     thermodynamic_quantities,
     z_comm,
     z_compute,
@@ -46,9 +49,12 @@ class TestZWarp:
         assert z_warp(1.0) > 0.0
 
     def test_high_beta_approaches_ground_state(self):
-        # At very high β, only the lowest-waste state (eligible, waste=0) contributes.
-        # Z_warp → exp(0) = 1  as β → ∞
-        assert abs(z_warp(1000.0) - 1.0) < 1e-3
+        # At very high β, Z_warp is dominated by the minimum-energy microstate.
+        from gpu_statmech.partition_function import _INPUT_ENERGY_GRID
+
+        beta = 1000.0
+        expected = math.exp(-beta * float(_INPUT_ENERGY_GRID.min()))
+        assert abs(z_warp(beta) - expected) < 1e-3 * max(expected, 1.0)
 
     def test_zero_beta_counts_all_states(self):
         # At β=0, Z_warp = number of warp states (all weights = 1)
@@ -61,6 +67,25 @@ class TestZWarp:
         betas = [0.1, 0.5, 1.0, 2.0, 5.0]
         vals = [z_warp(b) for b in betas]
         assert all(vals[i] > vals[i + 1] for i in range(len(vals) - 1))
+
+    def test_activity_potential_raises_z(self):
+        beta = 2.0
+        assert z_warp(beta, activity_potential=1.0) >= z_warp(beta, activity_potential=0.0)
+
+    def test_mean_activity_in_unit_interval(self):
+        act = mean_warp_activity(1.0, activity_potential=0.5)
+        assert 0.0 <= act <= 1.0
+
+    def test_mean_input_exceeds_useful_work(self):
+        e_in = mean_warp_input_energy(1.0, activity_potential=0.5)
+        work = mean_warp_useful_work(1.0, activity_potential=0.5)
+        assert e_in >= work >= 0.0
+
+    def test_mean_activity_increases_with_activity_potential(self):
+        beta = 1.5
+        low = mean_warp_activity(beta, activity_potential=0.0)
+        high = mean_warp_activity(beta, activity_potential=1.0)
+        assert high >= low
 
 
 # ---------------------------------------------------------------------------
@@ -200,10 +225,9 @@ class TestThermodynamicQuantities:
     def state(self) -> ThermodynamicState:
         return thermodynamic_quantities(beta=1.0)
 
-    def test_free_energy_leq_mean_waste(self, state):
-        # F ≤ <E> always (F = <E> - TS, S ≥ 0)
-        # In our normalised units: free_energy ≤ mean_waste
-        assert state.free_energy <= state.mean_waste + 1e-6
+    def test_free_energy_leq_mean_effective_energy(self, state):
+        # F ≤ <E_eff> always (F = <E_eff> - TS, S ≥ 0)
+        assert state.free_energy <= state.mean_effective_energy + 1e-6
 
     def test_entropy_nonneg(self, state):
         assert state.entropy >= -1e-6   # allow tiny numerical noise
@@ -220,6 +244,20 @@ class TestThermodynamicQuantities:
 
     def test_mean_waste_in_unit_interval(self, state):
         assert 0.0 <= state.mean_waste <= 1.0 + 1e-6
+
+    def test_mean_activity_in_unit_interval(self, state):
+        assert 0.0 <= state.mean_activity <= 1.0 + 1e-6
+
+    def test_input_energy_exceeds_useful_work(self, state):
+        assert state.mean_input_energy >= state.mean_useful_work >= 0.0
+
+    def test_eta_hw_in_unit_interval(self, state):
+        assert 0.0 <= state.eta_hw <= 1.0 + 1e-6
+
+    def test_state_activity_increases_with_activity_potential(self):
+        low = thermodynamic_quantities(beta=1.0, activity_potential=0.0)
+        high = thermodynamic_quantities(beta=1.0, activity_potential=1.0)
+        assert high.mean_activity >= low.mean_activity
 
     def test_consistency_across_beta(self):
         # As β increases (cooling), mean_waste should not increase

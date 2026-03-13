@@ -15,7 +15,7 @@ Z ≈ Z_compute × Z_memory × Z_comm
 
 From Z all standard thermodynamic quantities follow:
   F  = -kT ln Z          (free energy / maximum extractable work)
-  <E> = -d(ln Z)/dβ      (expected waste energy)
+  <E_eff> = -d(ln Z)/dβ  (expected effective energy E_in - h W_hw)
   S  = -dF/dT            (entropy of execution-state degeneracy)
   Cv = d<E>/dT           (specific heat / sensitivity to resource pressure)
 """
@@ -112,38 +112,283 @@ WARP_STATE_WASTE: dict[str, float] = {
     "idle":             1.0,   # no active warp
 }
 
+# Productive issue fraction for each scheduler-visible warp state.
+# This gates both the dynamic energy spent on issued work and the useful
+# hardware work extracted from the cycle.
+WARP_STATE_ACTIVITY: dict[str, float] = {
+    "eligible":         1.00,
+    "long_scoreboard":  0.00,
+    "short_scoreboard": 0.00,
+    "barrier":          0.00,
+    "exec_dep":         0.35,
+    "mem_throttle":     0.00,
+    "fetch":            0.10,
+    "idle":             0.00,
+}
+
+# Baseline input energy burned per warp-cycle in each scheduler state.  This
+# captures leakage plus state-specific overheads from front-end, scoreboard,
+# synchronisation, and issue logic.  Values are dimensionless and normalised so
+# one warp-cycle stays O(1).
+WARP_STATE_BASE_INPUT_ENERGY: dict[str, float] = {
+    "eligible":         0.08,
+    "long_scoreboard":  0.05,
+    "short_scoreboard": 0.06,
+    "barrier":          0.04,
+    "exec_dep":         0.07,
+    "mem_throttle":     0.06,
+    "fetch":            0.05,
+    "idle":             0.02,
+}
+
+# Dynamic input energy spent when a productive instruction issues in a warp
+# cycle.  Tensor-core issue slots define the upper end of the scale.
+INSTRUCTION_CLASS_INPUT_ENERGY: dict[str, float] = {
+    "tensor_core": 0.24,
+    "fp16":        0.16,
+    "fp32":        0.20,
+    "int":         0.12,
+    "sfu":         0.18,
+    "mem":         0.14,
+}
+
+# Useful hardware work extracted from a productive issue of each instruction
+# class, in the same dimensionless energy units as the input-energy model.
+INSTRUCTION_CLASS_USEFUL_WORK: dict[str, float] = {
+    "tensor_core": 0.22,
+    "fp16":        0.12,
+    "fp32":        0.09,
+    "int":         0.06,
+    "sfu":         0.07,
+    "mem":         0.02,
+}
+
+# Coarse prior over instruction classes within an issued warp cycle.  Using a
+# prior (rather than exploding the raw state count) preserves Z_warp(β=0)=N_states.
+INSTRUCTION_CLASS_PRIOR: dict[str, float] = {
+    "tensor_core": 0.12,
+    "fp16":        0.18,
+    "fp32":        0.30,
+    "int":         0.20,
+    "sfu":         0.08,
+    "mem":         0.12,
+}
+
 N_WARP_STATES = len(WARP_STATE_WASTE)
-_WARP_WASTE_VALUES = np.array(list(WARP_STATE_WASTE.values()), dtype=np.float64)
+_STATE_NAMES = tuple(WARP_STATE_WASTE.keys())
+_WARP_WASTE_VALUES = np.array([WARP_STATE_WASTE[s] for s in _STATE_NAMES], dtype=np.float64)
+_WARP_ACTIVITY_VALUES = np.array([WARP_STATE_ACTIVITY[s] for s in _STATE_NAMES], dtype=np.float64)
+_WARP_BASE_INPUT_VALUES = np.array(
+    [WARP_STATE_BASE_INPUT_ENERGY[s] for s in _STATE_NAMES], dtype=np.float64
+)
+_INSTR_NAMES = tuple(INSTRUCTION_CLASS_INPUT_ENERGY.keys())
+_INSTR_INPUT_VALUES = np.array(
+    [INSTRUCTION_CLASS_INPUT_ENERGY[i] for i in _INSTR_NAMES], dtype=np.float64
+)
+_INSTR_WORK_VALUES = np.array(
+    [INSTRUCTION_CLASS_USEFUL_WORK[i] for i in _INSTR_NAMES], dtype=np.float64
+)
+_INSTR_PRIOR_VALUES = np.array([INSTRUCTION_CLASS_PRIOR[i] for i in _INSTR_NAMES], dtype=np.float64)
+_INSTR_PRIOR_VALUES /= max(float(_INSTR_PRIOR_VALUES.sum()), 1e-12)
+_MEM_STALL_MASK = np.array(
+    [1.0 if s in ("long_scoreboard", "mem_throttle") else 0.0 for s in _STATE_NAMES],
+    dtype=np.float64,
+)
+_INPUT_ENERGY_GRID = (
+    _WARP_BASE_INPUT_VALUES[:, None]
+    + _WARP_ACTIVITY_VALUES[:, None] * _INSTR_INPUT_VALUES[None, :]
+)
+_USEFUL_WORK_GRID = _WARP_ACTIVITY_VALUES[:, None] * _INSTR_WORK_VALUES[None, :]
+
+
+def _resolve_work_field(
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
+    """
+    Backwards-compatible alias: ``activity_potential`` now maps to ``work_field``.
+    """
+    if activity_potential is not None:
+        return activity_potential
+    return work_field
+
+
+def _warp_microstate_weights(
+    beta: float,
+    work_field: float = 0.0,
+    bandwidth_penalty: float = 0.0,
+) -> NDArray[np.float64]:
+    """
+    Unnormalised Boltzmann weights over (warp_state, instruction_class).
+
+    The effective energy is:
+
+        E_eff = E_in(state, instr) + bandwidth_penalty * mem_stall(state)
+                - h * W_hw(state, instr)
+
+    where h is the useful-work field conjugate to productive hardware work.
+    """
+    eff_energy = (
+        _INPUT_ENERGY_GRID
+        + bandwidth_penalty * _MEM_STALL_MASK[:, None]
+        - work_field * _USEFUL_WORK_GRID
+    )
+    return _INSTR_PRIOR_VALUES[None, :] * np.exp(-beta * eff_energy)
+
+
+def _mean_warp_activity_from_weights(weights: NDArray[np.float64]) -> float:
+    total = max(float(weights.sum()), 1e-300)
+    return float(np.sum(weights * _WARP_ACTIVITY_VALUES[:, None]) / total)
+
+
+def _mean_input_energy_from_weights(
+    weights: NDArray[np.float64],
+    bandwidth_penalty: float = 0.0,
+) -> float:
+    total = max(float(weights.sum()), 1e-300)
+    input_grid = _INPUT_ENERGY_GRID + bandwidth_penalty * _MEM_STALL_MASK[:, None]
+    return float(np.sum(weights * input_grid) / total)
+
+
+def _mean_useful_work_from_weights(weights: NDArray[np.float64]) -> float:
+    total = max(float(weights.sum()), 1e-300)
+    return float(np.sum(weights * _USEFUL_WORK_GRID) / total)
+
+
+def _mean_mem_stall_from_weights(weights: NDArray[np.float64]) -> float:
+    state_weights = weights.sum(axis=1)
+    total = max(float(state_weights.sum()), 1e-300)
+    return float(np.dot(state_weights, _MEM_STALL_MASK) / total)
+
+
+def _solve_bandwidth_penalty(
+    beta: float,
+    sm_config: SMConfig,
+    hbm_bandwidth_bytes_per_cycle: float,
+    work_field: float = 0.0,
+) -> tuple[float, NDArray[np.float64]]:
+    """
+    Solve the mean-field bandwidth penalty λ and return (λ, equilibrium weights).
+    """
+    lambda_mf = 0.0
+    for _ in range(100):
+        weights = _warp_microstate_weights(
+            beta,
+            work_field=work_field,
+            bandwidth_penalty=lambda_mf,
+        )
+        mean_mem_stall_frac = _mean_mem_stall_from_weights(weights)
+        # Each stalled warp demands ~1 HBM transaction per latency window.
+        demand = sm_config.n_sm * sm_config.warps_per_sm * mean_mem_stall_frac
+        # Normalise to bandwidth capacity.
+        supply = hbm_bandwidth_bytes_per_cycle * sm_config.n_sm  # rough proxy
+        excess = max(0.0, demand - supply) / max(supply, 1e-12)
+        lambda_new = excess
+        if abs(lambda_new - lambda_mf) < 1e-8:
+            lambda_mf = lambda_new
+            break
+        lambda_mf = 0.5 * lambda_mf + 0.5 * lambda_new
+
+    weights = _warp_microstate_weights(
+        beta,
+        work_field=work_field,
+        bandwidth_penalty=lambda_mf,
+    )
+    return lambda_mf, weights
 
 
 # ---------------------------------------------------------------------------
 # Z_compute  (mean-field over SMs, warp-level factorisation)
 # ---------------------------------------------------------------------------
 
-def z_warp(beta: float) -> float:
+def z_warp(
+    beta: float,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
     """
     Single-warp partition function.
 
-    Z_warp(β) = Σ_{s ∈ warp_states} exp(-β · waste(s))
+    Z_warp(β, h) = Σ_{s, i} p(i) exp[-β (E_in(s, i) - h · W_hw(s, i))]
 
     β is the inverse resource-pressure (high β → low temperature → lightly loaded).
+    h is the useful-work field rewarding productive hardware work.
     """
-    return float(np.sum(np.exp(-beta * _WARP_WASTE_VALUES)))
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    return float(np.sum(_warp_microstate_weights(beta, work_field=resolved_work_field)))
 
 
-def z_sm(beta: float, warps_per_sm: int) -> float:
+def mean_warp_activity(
+    beta: float,
+    work_field: float = 0.0,
+    bandwidth_penalty: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
+    """
+    Mean productive activity per warp-cycle, normalised to the tensor-core scale.
+    """
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    weights = _warp_microstate_weights(
+        beta,
+        work_field=resolved_work_field,
+        bandwidth_penalty=bandwidth_penalty,
+    )
+    return _mean_warp_activity_from_weights(weights)
+
+
+def mean_warp_input_energy(
+    beta: float,
+    work_field: float = 0.0,
+    bandwidth_penalty: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
+    """Mean input energy per warp-cycle for the compute subsystem."""
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    weights = _warp_microstate_weights(
+        beta,
+        work_field=resolved_work_field,
+        bandwidth_penalty=bandwidth_penalty,
+    )
+    return _mean_input_energy_from_weights(weights, bandwidth_penalty=bandwidth_penalty)
+
+
+def mean_warp_useful_work(
+    beta: float,
+    work_field: float = 0.0,
+    bandwidth_penalty: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
+    """Mean useful hardware work per warp-cycle for the compute subsystem."""
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    weights = _warp_microstate_weights(
+        beta,
+        work_field=resolved_work_field,
+        bandwidth_penalty=bandwidth_penalty,
+    )
+    return _mean_useful_work_from_weights(weights)
+
+
+def z_sm(
+    beta: float,
+    warps_per_sm: int,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
     """
     Single-SM partition function under warp independence assumption.
 
     Z_SM(β) = Z_warp(β)^warps_per_sm
     """
-    return z_warp(beta) ** warps_per_sm
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    return z_warp(beta, work_field=resolved_work_field) ** warps_per_sm
 
 
 def mean_field_bandwidth_correction(
     beta: float,
     sm_config: SMConfig,
     hbm_bandwidth_bytes_per_cycle: float,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
 ) -> float:
     """
     Lagrange-multiplier correction for shared HBM bandwidth constraint.
@@ -159,33 +404,14 @@ def mean_field_bandwidth_correction(
 
     Returns the multiplicative correction factor to Z_compute.
     """
-    # Expected fraction of warps in memory-stalled states (long + mem_throttle)
-    waste_vals = _WARP_WASTE_VALUES
-    state_names = list(WARP_STATE_WASTE.keys())
-    mem_stall_mask = np.array(
-        [1.0 if s in ("long_scoreboard", "mem_throttle") else 0.0 for s in state_names]
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    lambda_mf, weights = _solve_bandwidth_penalty(
+        beta,
+        sm_config,
+        hbm_bandwidth_bytes_per_cycle,
+        work_field=resolved_work_field,
     )
-
-    # Mean-field: iterate to self-consistency
-    lambda_mf = 0.0
-    for _ in range(100):
-        weights = np.exp(-beta * (waste_vals + lambda_mf * mem_stall_mask))
-        weights /= weights.sum()
-        mean_mem_stall_frac = float(np.dot(weights, mem_stall_mask))
-        # Each stalled warp demands ~1 HBM transaction per latency window
-        demand = sm_config.n_sm * sm_config.warps_per_sm * mean_mem_stall_frac
-        # Normalise to bandwidth capacity
-        supply = hbm_bandwidth_bytes_per_cycle * sm_config.n_sm  # rough proxy
-        excess = max(0.0, demand - supply) / max(supply, 1e-12)
-        lambda_new = excess
-        if abs(lambda_new - lambda_mf) < 1e-8:
-            break
-        lambda_mf = 0.5 * lambda_mf + 0.5 * lambda_new   # damped update
-
-    # log(correction) = N_SM × (-β λ <mem_stall>)  — keep in log space to avoid overflow
-    weights = np.exp(-beta * (waste_vals + lambda_mf * mem_stall_mask))
-    weights /= weights.sum()
-    mean_mem_stall_frac = float(np.dot(weights, mem_stall_mask))
+    mean_mem_stall_frac = _mean_mem_stall_from_weights(weights)
     log_correction_per_sm = -beta * lambda_mf * mean_mem_stall_frac
     return log_correction_per_sm * sm_config.n_sm   # log of total correction
 
@@ -195,6 +421,8 @@ def log_z_compute(
     sm_config: SMConfig,
     hbm_bandwidth_bytes_per_cycle: float,
     apply_bandwidth_correction: bool = True,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
 ) -> float:
     """
     Log of the full compute partition function — always in log space to avoid overflow.
@@ -204,9 +432,17 @@ def log_z_compute(
     Z_SM^N_SM overflows float64 even at moderate N (e.g. 8^(64×132) ≈ 10^7500),
     so we never materialise Z itself.
     """
-    log_z = sm_config.n_sm * sm_config.warps_per_sm * math.log(max(z_warp(beta), 1e-300))
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    log_z = sm_config.n_sm * sm_config.warps_per_sm * math.log(
+        max(z_warp(beta, work_field=resolved_work_field), 1e-300)
+    )
     if apply_bandwidth_correction:
-        log_z += mean_field_bandwidth_correction(beta, sm_config, hbm_bandwidth_bytes_per_cycle)
+        log_z += mean_field_bandwidth_correction(
+            beta,
+            sm_config,
+            hbm_bandwidth_bytes_per_cycle,
+            work_field=resolved_work_field,
+        )
     return log_z
 
 
@@ -215,13 +451,98 @@ def z_compute(
     sm_config: SMConfig,
     hbm_bandwidth_bytes_per_cycle: float,
     apply_bandwidth_correction: bool = True,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
 ) -> float:
     """
     Compute partition function (raw value).  Will overflow for large N_SM / low β —
     use log_z_compute() for all thermodynamic calculations.
     """
-    return math.exp(log_z_compute(beta, sm_config, hbm_bandwidth_bytes_per_cycle,
-                                   apply_bandwidth_correction))
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    return math.exp(log_z_compute(
+        beta,
+        sm_config,
+        hbm_bandwidth_bytes_per_cycle,
+        apply_bandwidth_correction,
+        work_field=resolved_work_field,
+    ))
+
+
+def mean_compute_activity(
+    beta: float,
+    sm_config: SMConfig,
+    hbm_bandwidth_bytes_per_cycle: float,
+    apply_bandwidth_correction: bool = True,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
+    """
+    Mean productive compute activity per warp under the compute partition function.
+    """
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    bandwidth_penalty = 0.0
+    if apply_bandwidth_correction:
+        bandwidth_penalty, _ = _solve_bandwidth_penalty(
+            beta,
+            sm_config,
+            hbm_bandwidth_bytes_per_cycle,
+            work_field=resolved_work_field,
+        )
+    return mean_warp_activity(
+        beta,
+        work_field=resolved_work_field,
+        bandwidth_penalty=bandwidth_penalty,
+    )
+
+
+def mean_compute_input_energy(
+    beta: float,
+    sm_config: SMConfig,
+    hbm_bandwidth_bytes_per_cycle: float,
+    apply_bandwidth_correction: bool = True,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
+    """Mean compute-side input energy per warp, including bandwidth pressure."""
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    bandwidth_penalty = 0.0
+    if apply_bandwidth_correction:
+        bandwidth_penalty, _ = _solve_bandwidth_penalty(
+            beta,
+            sm_config,
+            hbm_bandwidth_bytes_per_cycle,
+            work_field=resolved_work_field,
+        )
+    return mean_warp_input_energy(
+        beta,
+        work_field=resolved_work_field,
+        bandwidth_penalty=bandwidth_penalty,
+    )
+
+
+def mean_compute_useful_work(
+    beta: float,
+    sm_config: SMConfig,
+    hbm_bandwidth_bytes_per_cycle: float,
+    apply_bandwidth_correction: bool = True,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+) -> float:
+    """Mean compute-side useful hardware work per warp."""
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
+    bandwidth_penalty = 0.0
+    if apply_bandwidth_correction:
+        bandwidth_penalty, _ = _solve_bandwidth_penalty(
+            beta,
+            sm_config,
+            hbm_bandwidth_bytes_per_cycle,
+            work_field=resolved_work_field,
+        )
+    return mean_warp_useful_work(
+        beta,
+        work_field=resolved_work_field,
+        bandwidth_penalty=bandwidth_penalty,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -380,16 +701,25 @@ class ThermodynamicState:
     beta: float
     log_Z: float
 
-    # Primary quantities (natural units: waste energy normalised to [0,1])
+    # Primary quantities (all intensive, normalised per warp DOF)
     free_energy: float           # F = -kT ln Z  (in units of kT)
-    mean_waste: float            # <E> = -d(ln Z)/dβ
-    entropy: float               # S = β(<E> - F)  [dimensionless, in units of k]
-    specific_heat: float         # Cv = β² d<E>/dβ  [dimensionless]
+    mean_effective_energy: float # <E_in - h W_hw> from -d(ln Z)/dβ
+    mean_input_energy: float     # <E_in>
+    mean_useful_work: float      # <W_hw>
+    mean_waste: float            # <E_in - W_hw>
+    mean_activity: float         # productive issue activity per warp-cycle
+    entropy: float               # S = β(<E_eff> - F)  [dimensionless]
+    specific_heat: float         # Cv = β² d<E_eff>/dβ  [dimensionless]
 
     # Decomposed contributions
     log_Z_compute: float
     log_Z_memory: float
     log_Z_comm: float
+
+    @property
+    def eta_hw(self) -> float:
+        """Hardware efficiency η_hw = <W_hw> / <E_in>."""
+        return self.mean_useful_work / max(self.mean_input_energy, 1e-12)
 
 
 def log_gpu_partition_function(
@@ -398,6 +728,8 @@ def log_gpu_partition_function(
     memory_levels: list[MemoryLevel] | None = None,
     comm_edges: list[TopologyEdge] | None = None,
     n_bins: int = 64,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
 ) -> float:
     """
     ln Z(β) = ln Z_compute(β) + ln Z_memory(β) + ln Z_comm(β)
@@ -411,8 +743,14 @@ def log_gpu_partition_function(
     if comm_edges is None:
         comm_edges = []
 
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
     hbm_bw = memory_levels[-1].bandwidth_bytes_per_cycle
-    log_zc = log_z_compute(beta, sm_config, hbm_bw)
+    log_zc = log_z_compute(
+        beta,
+        sm_config,
+        hbm_bw,
+        work_field=resolved_work_field,
+    )
     log_zm = math.log(max(z_memory(beta, memory_levels, n_bins), 1e-300))
     log_zk = math.log(max(z_comm(beta, comm_edges, sm_config.n_sm), 1e-300))
     return log_zc + log_zm + log_zk
@@ -424,6 +762,8 @@ def gpu_partition_function(
     memory_levels: list[MemoryLevel] | None = None,
     comm_edges: list[TopologyEdge] | None = None,
     n_bins: int = 64,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
 ) -> float:
     """
     Z(β) = exp(ln Z_compute + ln Z_memory + ln Z_comm).
@@ -432,7 +772,14 @@ def gpu_partition_function(
     for thermodynamic calculations.  Retained for small/toy hardware configs.
     """
     return math.exp(log_gpu_partition_function(
-        beta, sm_config, memory_levels, comm_edges, n_bins))
+        beta,
+        sm_config,
+        memory_levels,
+        comm_edges,
+        n_bins,
+        work_field=work_field,
+        activity_potential=activity_potential,
+    ))
 
 
 def thermodynamic_quantities(
@@ -442,15 +789,17 @@ def thermodynamic_quantities(
     comm_edges: list[TopologyEdge] | None = None,
     n_bins: int = 64,
     d_beta: float = 1e-4,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
 ) -> ThermodynamicState:
     """
     Compute all thermodynamic quantities at inverse temperature β by finite
     differences of ln Z.
 
         F   = -ln Z / β          (free energy in units of kT)
-        <E> = -d(ln Z)/dβ        (mean waste, numerical derivative)
-        S   = β(<E> - F)         (entropy in units of k_B)
-        Cv  = β² × d<E>/dβ       (specific heat, dimensionless)
+        <E_eff> = -d(ln Z)/dβ     (mean effective energy, numerical derivative)
+        S       = β(<E_eff> - F)  (entropy in units of k_B)
+        Cv      = β² × d<E_eff>/dβ (specific heat, dimensionless)
     """
     if sm_config is None:
         sm_config = H100_SM_CONFIG
@@ -459,13 +808,26 @@ def thermodynamic_quantities(
     if comm_edges is None:
         comm_edges = []
 
+    resolved_work_field = _resolve_work_field(work_field, activity_potential)
     hbm_bw = memory_levels[-1].bandwidth_bytes_per_cycle
 
     def ln_z(b: float) -> float:
-        return log_gpu_partition_function(b, sm_config, memory_levels, comm_edges, n_bins)
+        return log_gpu_partition_function(
+            b,
+            sm_config,
+            memory_levels,
+            comm_edges,
+            n_bins,
+            work_field=resolved_work_field,
+        )
 
     def ln_z_component(b: float) -> tuple[float, float, float]:
-        log_zc = log_z_compute(b, sm_config, hbm_bw)
+        log_zc = log_z_compute(
+            b,
+            sm_config,
+            hbm_bw,
+            work_field=resolved_work_field,
+        )
         log_zm = math.log(max(z_memory(b, memory_levels, n_bins), 1e-300))
         log_zk = math.log(max(z_comm(b, comm_edges, sm_config.n_sm), 1e-300))
         return log_zc, log_zm, log_zk
@@ -481,8 +843,8 @@ def thermodynamic_quantities(
     # Dividing by n_dof gives intensive (per-DOF) quantities in [0, 1].
     n_dof = float(sm_config.n_sm * sm_config.warps_per_sm)
 
-    # <E>/n_dof = -(1/n_dof) d(ln Z)/dβ  (central difference) → ∈ [0, 1]
-    mean_waste = -(lz_plus - lz_minus) / (2 * d_beta * n_dof)
+    # <E_eff>/n_dof = -(1/n_dof) d(ln Z)/dβ
+    mean_effective_energy = -(lz_plus - lz_minus) / (2 * d_beta * n_dof)
 
     # Cv/n_dof = β² × (1/n_dof) × d²(ln Z)/dβ² = β² × var(E_per_dof) ≥ 0
     # Sign: d²(ln Z)/dβ² = var(E) ≥ 0, so Cv = +β² × d²(ln Z)/dβ²
@@ -490,15 +852,44 @@ def thermodynamic_quantities(
     specific_heat = beta**2 * d2_ln_z / n_dof
 
     free_energy = -lz / (max(beta, 1e-12) * n_dof)
-    entropy = beta * (mean_waste - free_energy)   # per-DOF entropy (nats per warp)
-
     lzc, lzm, lzk = ln_z_component(beta)
+    lzc_plus, lzm_plus, lzk_plus = ln_z_component(beta + d_beta)
+    lzc_minus, lzm_minus, lzk_minus = ln_z_component(beta - d_beta)
+
+    mean_memory_input_energy = -(lzm_plus - lzm_minus) / (2 * d_beta * n_dof)
+    mean_comm_input_energy = -(lzk_plus - lzk_minus) / (2 * d_beta * n_dof)
+    mean_compute_input = mean_compute_input_energy(
+        beta,
+        sm_config,
+        hbm_bw,
+        work_field=resolved_work_field,
+    )
+    mean_compute_work = mean_compute_useful_work(
+        beta,
+        sm_config,
+        hbm_bw,
+        work_field=resolved_work_field,
+    )
+    mean_input_energy = mean_compute_input + mean_memory_input_energy + mean_comm_input_energy
+    mean_useful_work = mean_compute_work
+    mean_waste = max(mean_input_energy - mean_useful_work, 0.0)
+    mean_activity = mean_compute_activity(
+        beta,
+        sm_config,
+        hbm_bw,
+        work_field=resolved_work_field,
+    )
+    entropy = beta * (mean_effective_energy - free_energy)
 
     return ThermodynamicState(
         beta=beta,
         log_Z=lz,
         free_energy=free_energy,
+        mean_effective_energy=mean_effective_energy,
+        mean_input_energy=mean_input_energy,
+        mean_useful_work=mean_useful_work,
         mean_waste=mean_waste,
+        mean_activity=mean_activity,
         entropy=entropy,
         specific_heat=specific_heat,
         log_Z_compute=lzc,
@@ -513,9 +904,19 @@ def beta_sweep(
     memory_levels: list[MemoryLevel] | None = None,
     comm_edges: list[TopologyEdge] | None = None,
     n_bins: int = 64,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
 ) -> list[ThermodynamicState]:
     """Compute thermodynamic quantities over a range of β values."""
     return [
-        thermodynamic_quantities(b, sm_config, memory_levels, comm_edges, n_bins)
+        thermodynamic_quantities(
+            b,
+            sm_config,
+            memory_levels,
+            comm_edges,
+            n_bins,
+            work_field=work_field,
+            activity_potential=activity_potential,
+        )
         for b in betas
     ]
