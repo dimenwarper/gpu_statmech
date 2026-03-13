@@ -1,7 +1,7 @@
 """
 Experiment 03: Multi-GPU Scaling Efficiency
 ============================================
-Runs the current multi-GPU topology proxy for 1 → 64 GPUs across four
+Runs the energy-based multi-GPU limit for 1 → 64 GPUs across four
 interconnect topologies:
   - NVLink-4 clique        (J = 0.10, BW = 900 GB/s)   ferromagnetic
   - NVSwitch fabric        (J = 0.10, BW = 900 GB/s)   ferromagnetic
@@ -9,14 +9,14 @@ interconnect topologies:
   - InfiniBand HDR mesh    (J = 5.00, BW =  50 GB/s)   spin-glass
 
 Key quantities:
-  - η_multi,max(n_gpu) — current multi-GPU ceiling proxy
+  - η_multi,max(n_gpu) — energy-based multi-GPU ceiling
   - scaling_efficiency = η_multi,max / η_hw,max,single
-  - resonance_eta — communication log-share complement from the current model
-  - comm_overhead_fraction
+  - balance_proxy — useful-work / communication-energy balance proxy
+  - comm_energy_share — fraction of total input energy spent in communication
 
-Important caveat: the current multi_gpu.py path is still a legacy J-only
-communication model. The reported "resonance_eta" here is not a timing-based
-overlap metric and does not directly use link bandwidth or latency.
+Important caveat: the communication subsystem now uses bandwidth and latency
+to scale the link cost, but the reported balance proxy is still not a
+timing-based overlap metric.
 """
 
 import sys
@@ -44,11 +44,11 @@ print("=" * 60)
 # Single-GPU reference limit (computed once)
 # ---------------------------------------------------------------------------
 
-single_limit = derive_carnot_limit(n_beta=100)
+single_limit = derive_carnot_limit(n_beta=80, n_bins=32)
 eta_single   = single_limit.eta_hw_max
 print(f"\n  Single-GPU η_hw,max = {eta_single:.4f}  ({eta_single*100:.2f}%)")
-print("  Note: multi-GPU values below are legacy topology proxies, not timing-accurate")
-print("        overlap predictions.")
+print("  Note: multi-GPU values below use the energy-based <W_hw>/<E_in> limit.")
+print("        The balance proxy is not a timing-overlap prediction.")
 
 # ---------------------------------------------------------------------------
 # GPU counts and topology builders
@@ -84,8 +84,8 @@ MARKERS = {
 results: dict[str, dict] = {name: {
     "eta_multi_max": [],
     "scaling_eff":   [],
-    "resonance_eta": [],
-    "comm_overhead": [],
+    "balance_proxy": [],
+    "comm_energy": [],
 } for name in TOPOLOGIES}
 
 for n in n_gpu_values:
@@ -95,39 +95,40 @@ for n in n_gpu_values:
         limit = derive_multi_gpu_carnot_limit(
             topo,
             eta_hw_max_single=eta_single,
+            target_activity=single_limit.target_activity,
             n_beta=80, n_bins=32,
         )
         r = results[topo_name]
         r["eta_multi_max"].append(limit.eta_multi_max)
         r["scaling_eff"].append(limit.scaling_efficiency())
-        r["resonance_eta"].append(limit.resonance_eta)
-        r["comm_overhead"].append(limit.comm_overhead_fraction)
+        r["balance_proxy"].append(limit.resonance_eta)
+        r["comm_energy"].append(limit.comm_overhead_fraction)
         print(f"    {topo_name:<22s}  η_multi,max={limit.eta_multi_max:.4f}  "
               f"scaling={limit.scaling_efficiency():.4f}  "
-              f"log-share proxy={limit.resonance_eta:.4f}  "
-              f"comm={limit.comm_overhead_fraction*100:.1f}%")
+              f"balance={limit.resonance_eta:.4f}  "
+              f"comm energy={limit.comm_overhead_fraction*100:.1f}%")
 
 # ---------------------------------------------------------------------------
 # Summary table
 # ---------------------------------------------------------------------------
 
 print()
-print("  Summary at n_gpu = 64  (legacy topology proxy)")
+print("  Summary at n_gpu = 64")
 print(f"  {'Topology':<24} {'η_multi,max':>12} {'scaling_eff':>12} "
-      f"{'log-share':>11} {'comm_overhead':>14}")
+      f"{'balance':>11} {'comm_energy':>14}")
 print("  " + "-" * 77)
 for name, r in results.items():
     print(f"  {name:<24} {r['eta_multi_max'][-1]:>12.4f} "
           f"{r['scaling_eff'][-1]:>12.4f} "
-          f"{r['resonance_eta'][-1]:>11.4f} "
-          f"{r['comm_overhead'][-1]*100:>12.1f}%")
+          f"{r['balance_proxy'][-1]:>11.4f} "
+          f"{r['comm_energy'][-1]*100:>12.1f}%")
 
 # ---------------------------------------------------------------------------
 # Plot
 # ---------------------------------------------------------------------------
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-fig.suptitle("Multi-GPU Topology Proxy  (legacy J-only communication model)",
+fig.suptitle("Multi-GPU Efficiency Limit  (<W_hw>/<E_in> with topology penalties)",
              fontsize=14, fontweight="bold")
 
 # --- η_multi,max(n_gpu) -------------------------------------------------------
@@ -153,7 +154,7 @@ for name, r in results.items():
             color=COLORS[name], marker=MARKERS[name], lw=2, ms=7, label=name)
 ax.set_xlabel("Number of GPUs", fontsize=11)
 ax.set_ylabel("η_multi,max / η_hw,max,single", fontsize=11)
-ax.set_title("Scaling Proxy  η_multi,max / η_single", fontsize=12)
+ax.set_title("Scaling Efficiency  η_multi,max / η_single", fontsize=12)
 ax.set_xscale("log", base=2)
 ax.set_xticks(n_gpu_values)
 ax.set_xticklabels(n_gpu_values)
@@ -161,14 +162,14 @@ ax.set_ylim(0, 1.05)
 ax.legend(fontsize=9)
 ax.grid(alpha=0.3)
 
-# --- resonance_eta(n_gpu) -----------------------------------------------------
+# --- balance proxy ------------------------------------------------------------
 ax = axes[1, 0]
 for name, r in results.items():
-    ax.plot(n_gpu_values, r["resonance_eta"],
+    ax.plot(n_gpu_values, r["balance_proxy"],
             color=COLORS[name], marker=MARKERS[name], lw=2, ms=7, label=name)
 ax.set_xlabel("Number of GPUs", fontsize=11)
-ax.set_ylabel("legacy proxy", fontsize=11)
-ax.set_title("Communication Log-Share Complement  (legacy proxy)", fontsize=12)
+ax.set_ylabel("energy-balance proxy", fontsize=11)
+ax.set_title("Useful-Work / Communication Balance Proxy", fontsize=12)
 ax.set_xscale("log", base=2)
 ax.set_xticks(n_gpu_values)
 ax.set_xticklabels(n_gpu_values)
@@ -176,14 +177,14 @@ ax.set_ylim(0, 1.05)
 ax.legend(fontsize=9)
 ax.grid(alpha=0.3)
 
-# --- comm_overhead(n_gpu) -----------------------------------------------------
+# --- comm energy share --------------------------------------------------------
 ax = axes[1, 1]
 for name, r in results.items():
-    ax.plot(n_gpu_values, [v * 100 for v in r["comm_overhead"]],
+    ax.plot(n_gpu_values, [v * 100 for v in r["comm_energy"]],
             color=COLORS[name], marker=MARKERS[name], lw=2, ms=7, label=name)
 ax.set_xlabel("Number of GPUs", fontsize=11)
-ax.set_ylabel("Comm overhead  (%)", fontsize=11)
-ax.set_title("Communication Overhead Fraction  (DOFs in comm subsystem)", fontsize=12)
+ax.set_ylabel("Comm energy share  (%)", fontsize=11)
+ax.set_title("Communication Energy Fraction", fontsize=12)
 ax.set_xscale("log", base=2)
 ax.set_xticks(n_gpu_values)
 ax.set_xticklabels(n_gpu_values)

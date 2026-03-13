@@ -27,6 +27,7 @@ from gpu_statmech.partition_function import (
     SMConfig,
     TopologyEdge,
     log_gpu_partition_function,
+    thermodynamic_quantities,
 )
 from gpu_statmech.multi_gpu import (
     MultiGPUCarnotLimit,
@@ -90,6 +91,11 @@ class TestTopologyGraph:
 
     def test_single_gpu_no_links(self):
         g = TopologyGraph.nvlink_clique(1)
+        assert g.n_gpu == 1
+        assert len(g.links) == 0
+
+    def test_single_gpu_pcie_ring_has_no_self_loops(self):
+        g = TopologyGraph.pcie_ring(1)
         assert g.n_gpu == 1
         assert len(g.links) == 0
 
@@ -176,6 +182,22 @@ class TestLogZCommTopology:
         g_high = TopologyGraph(n_gpu=2, links=[TopologyEdge(0, 1, high_J)])
         assert _log_z_comm_topology(beta, g_high) < _log_z_comm_topology(beta, g_low)
 
+    def test_more_negative_with_slower_bandwidth(self):
+        beta = 2.0
+        fast = LinkConfig("fast", bandwidth_gb_s=900, latency_us=1.0, coupling_J=1.0)
+        slow = LinkConfig("slow", bandwidth_gb_s=64, latency_us=1.0, coupling_J=1.0)
+        g_fast = TopologyGraph(n_gpu=2, links=[TopologyEdge(0, 1, fast)])
+        g_slow = TopologyGraph(n_gpu=2, links=[TopologyEdge(0, 1, slow)])
+        assert _log_z_comm_topology(beta, g_slow) < _log_z_comm_topology(beta, g_fast)
+
+    def test_more_negative_with_higher_latency(self):
+        beta = 2.0
+        low_lat = LinkConfig("low_lat", bandwidth_gb_s=900, latency_us=1.0, coupling_J=1.0)
+        high_lat = LinkConfig("high_lat", bandwidth_gb_s=900, latency_us=3.5, coupling_J=1.0)
+        g_low = TopologyGraph(n_gpu=2, links=[TopologyEdge(0, 1, low_lat)])
+        g_high = TopologyGraph(n_gpu=2, links=[TopologyEdge(0, 1, high_lat)])
+        assert _log_z_comm_topology(beta, g_high) < _log_z_comm_topology(beta, g_low)
+
     def test_proportional_to_n_links_same_J(self):
         # For identical links, log Z = n_links × log Z_single_link
         lc = LinkConfig("lc", bandwidth_gb_s=100, latency_us=1.0, coupling_J=1.0)
@@ -245,6 +267,9 @@ class TestMultiGPUThermodynamicQuantities:
     def test_mean_waste_in_unit_interval(self, state_2gpu):
         assert 0.0 <= state_2gpu.mean_waste <= 1.0 + 1e-6
 
+    def test_eta_multi_in_unit_interval(self, state_2gpu):
+        assert 0.0 <= state_2gpu.eta_multi <= 1.0 + 1e-6
+
     def test_entropy_nonneg(self, state_2gpu):
         assert state_2gpu.entropy >= -1e-4
 
@@ -263,11 +288,14 @@ class TestMultiGPUThermodynamicQuantities:
         assert state_2gpu.n_gpu == 2
 
     def test_single_gpu_matches_reference(self):
-        # Single GPU, no links: mean_waste should match single-GPU β sweep value
+        # Single GPU, no links should match the single-GPU thermodynamics.
         g = TopologyGraph(n_gpu=1, links=[])
         state = multi_gpu_thermodynamic_quantities(1.0, g, _TINY_SM, _TINY_MEM, n_bins=16)
-        # Just check it's in a reasonable range — exact match tested via decomposition
-        assert 0.0 <= state.mean_waste <= 1.0
+        reference = thermodynamic_quantities(1.0, _TINY_SM, _TINY_MEM, comm_edges=[], n_bins=16)
+        assert state.mean_input_energy == pytest.approx(reference.mean_input_energy)
+        assert state.mean_useful_work == pytest.approx(reference.mean_useful_work)
+        assert state.mean_waste == pytest.approx(reference.mean_waste)
+        assert state.eta_multi == pytest.approx(reference.eta_hw)
 
     def test_mean_waste_increases_with_more_links(self):
         # Adding higher-J links raises mean waste
@@ -278,6 +306,7 @@ class TestMultiGPUThermodynamicQuantities:
         s_ib = multi_gpu_thermodynamic_quantities(beta, g_ib, _TINY_SM, _TINY_MEM, n_bins=16)
         # IB has higher J → more comm waste → higher total mean waste
         assert s_ib.mean_waste >= s_nvlink.mean_waste - 1e-6
+        assert s_ib.mean_comm_input_energy >= s_nvlink.mean_comm_input_energy - 1e-6
 
     def test_mean_waste_decreases_with_beta(self):
         # Colder system (higher β) → less waste
@@ -288,6 +317,10 @@ class TestMultiGPUThermodynamicQuantities:
         ]
         for i in range(len(wastes) - 1):
             assert wastes[i] >= wastes[i + 1] - 0.01
+
+    def test_comm_energy_fraction_is_bounded(self, state_2gpu):
+        frac = state_2gpu.mean_comm_input_energy / max(state_2gpu.mean_input_energy, 1e-12)
+        assert 0.0 <= frac <= 1.0 + 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +432,7 @@ class TestMultiGPUCarnotLimit:
         st = nvlink_limit.thermo_state
         assert st.beta == pytest.approx(nvlink_limit.beta_optimal)
         assert 0.0 <= st.mean_waste <= 1.0
+        assert nvlink_limit.eta_multi_max == pytest.approx(st.eta_multi, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

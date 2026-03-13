@@ -26,11 +26,12 @@
 
 - The fixed-load closure removes the arbitrary free-field sweep and makes `h` an interpretable operating-point variable.
 - With the current normalized energy tables, the fixed-load Carnot sweep still peaks at the upper beta boundary (`beta = 10.0` for the default sweep). The closure fixes the interpretation of `h`, but it does not by itself create an interior beta optimum.
-- The single-GPU path is now expressed in `<W_hw> / <E_in>` terms. The multi-GPU path still uses a waste-based proxy and a temporary ceiling clamp to stay consistent with the single-GPU limit.
+- The single-GPU and multi-GPU paths are now both expressed in `<W_hw> / <E_in>` terms.
+- The remaining weak spot in the multi-GPU theory is not the efficiency definition anymore; it is the lack of a fixed communication-demand closure. Topology-only sweeps therefore remain close to the single-GPU ceiling.
 
 ### Validation
 
-- `uv run pytest -q` -> `358 passed`
+- `uv run pytest -q` -> `363 passed`
 
 ### Experiment clean-up
 
@@ -51,3 +52,12 @@
   - locality/feedability (coalescing, reuse, low redundant movement)
   - occupancy
 - Re-ran experiment 01 after the closure; at `target_activity = 0.20` the reported single-GPU limit dropped from `30.95%` to `16.46%`, which is directionally consistent with the missing memory coupling being restored.
+
+### Multi-GPU energy refactor
+
+- Refactored `multi_gpu.py` onto the same `<W_hw> / <E_in>` formulation as the single-GPU path:
+  - multi-GPU states now carry `mean_input_energy`, `mean_useful_work`, `mean_comm_input_energy`, and `eta_multi`
+  - the communication subsystem now folds link bandwidth and latency into the effective link cost instead of using only `J`
+  - `derive_multi_gpu_carnot_limit()` now maximizes `eta_multi = <W_hw>/<E_in>` instead of `1 - mean_waste`
+- Updated `experiments/theoretical_calculations/03_scaling_efficiency.py` to use the energy-based multi-GPU ceiling and to report communication energy share instead of the old log-share language.
+- Re-ran experiment 03. The result is now theoretically consistent with the refactor, but still nearly flat across topologies because the model does not yet enforce a communication-demand closure.

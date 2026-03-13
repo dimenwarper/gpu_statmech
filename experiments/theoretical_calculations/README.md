@@ -21,7 +21,9 @@ Current caveats:
 - Experiment 01 now also includes a first-order memory-feed closure, so the
   reported single-GPU efficiency is lower than the earlier compute-only value.
 - Experiment 02 removes the old "min reuse" claim because that formula is not yet calibrated as a literal reuse count.
-- Experiment 03 is still a legacy J-only topology proxy; it does not directly use link bandwidth or latency in the thermodynamic limit.
+- Experiment 03 now uses the energy-based multi-GPU limit, but it still lacks
+  a fixed communication-demand closure; topology-only sweeps therefore stay
+  close to the single-GPU ceiling.
 
 ## Experiments
 
@@ -80,25 +82,29 @@ underlying formula is recalibrated as a true dimensionless reuse count.
 
 ### 03 — Multi-GPU Scaling Efficiency [`03_scaling_efficiency.py`](03_scaling_efficiency.py)
 
-Runs the current multi-GPU topology proxy for 1→64 GPUs across four
-interconnect topologies using the coupled partition function
+Runs the energy-based multi-GPU limit for 1→64 GPUs across four interconnect
+topologies using the coupled partition function
 `ln Z_multi = N × ln Z_single + ln Z_comm_topology`.
 
-**Key result:** After the single-GPU compute-memory closure, the current
-multi-GPU path is still ceiling-clipped and J-only, so `eta_multi,max` stays
-flat at the single-GPU value (**0.1646**) across topologies. The only topology-dependent
-signal left in this experiment is the legacy communication log-share proxy,
-which is weakest for InfiniBand at 64 GPUs.
+**Key result:** The multi-GPU path now uses the same `<W_hw>/<E_in>` framing
+as the single-GPU model and folds link bandwidth/latency into the effective
+communication cost. But because the model still lacks a fixed
+communication-demand closure, the bare-topology sweep remains very close to
+the single-GPU ceiling (**0.1650**) for all topologies. The only visible
+differences are small balance-proxy and communication-energy shifts, with
+InfiniBand worst at 64 GPUs.
 
-| Topology | η_multi,max @ 64 GPU | scaling_eff | legacy proxy |
-|---|---|---|---|
-| NVLink-4 clique | 0.1646 | 1.0000 | 0.9976 |
-| NVSwitch fabric | 0.1646 | 1.0000 | 0.9976 |
-| PCIe Gen5 ring | 0.1646 | 1.0000 | 0.9996 |
-| InfiniBand fat-tree | 0.1646 | 1.0000 | 0.9788 |
+| Topology | η_multi,max @ 64 GPU | scaling_eff | balance proxy | comm energy |
+|---|---|---|---|---|
+| NVLink-4 clique | 0.1650 | 0.9999 | 0.0007 | 0.0% |
+| NVSwitch fabric | 0.1650 | 0.9999 | 0.0007 | 0.0% |
+| PCIe Gen5 ring | 0.1650 | 0.9999 | 0.0016 | 0.0% |
+| InfiniBand fat-tree | 0.1650 | 0.9999 | 0.0016 | 0.0% |
 
-Treat this as a topology-coupling proxy only. It is not yet a physically
-grounded overlap or scaling-efficiency prediction.
+Treat this as a topology-aware energy envelope, not a workload-aware scaling
+prediction. To make experiment 03 truly discriminative, the next missing
+piece is a communication-load closure analogous to the fixed activity closure
+used in experiment 01.
 
 **Figure:** `figures/03_scaling_efficiency.png`
 

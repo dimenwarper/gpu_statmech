@@ -117,7 +117,10 @@ Wraps the gpusim Python API and adds:
 - Resonance condition: η_overlap = T_overlapped / max(T_compute, T_comm)
 - Parallelism optimizer: enumerate (dp, tp, pp, ep, cp) configs, score each by η_multi
 
-Current caveat: the multi-GPU path still ranks topologies with a waste-based communication proxy. The single-GPU `E_in - h W_hw` refactor has not yet been propagated through `multi_gpu.py`.
+Current caveat: the multi-GPU path now uses the same `E_in - h W_hw`
+framing as the single-GPU model, but it still lacks a fixed
+communication-demand closure. Bare-topology sweeps therefore stay close to
+the single-GPU limit unless a workload-specific communication model is added.
 
 **Deliverables:** `src/gpu_statmech/multi_gpu.py`, `src/gpu_statmech/parallelism.py`
 
