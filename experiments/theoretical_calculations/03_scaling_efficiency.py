@@ -1,8 +1,8 @@
 """
 Experiment 03: Multi-GPU Scaling Efficiency
 ============================================
-Runs the energy-based multi-GPU limit for 1 → 64 GPUs across four
-interconnect topologies:
+Runs the energy-based multi-GPU limit for a canonical distributed-training
+communication load across 1 → 64 GPUs and four interconnect topologies:
   - NVLink-4 clique        (J = 0.10, BW = 900 GB/s)   ferromagnetic
   - NVSwitch fabric        (J = 0.10, BW = 900 GB/s)   ferromagnetic
   - PCIe Gen 5 ring        (J = 1.00, BW =  64 GB/s)   weakly coupled
@@ -14,9 +14,12 @@ Key quantities:
   - balance_proxy — useful-work / communication-energy balance proxy
   - comm_energy_share — fraction of total input energy spent in communication
 
-Important caveat: the communication subsystem now uses bandwidth and latency
-to scale the link cost, but the reported balance proxy is still not a
-timing-based overlap metric.
+Communication demand closure:
+  - Workload: LLaMA-7B
+  - Pattern:  pure data parallelism (DP-n all-reduce style demand)
+  - target_comm_load = total_bytes / (BW_ref * T_compute_ref)
+
+The balance proxy is still not a timing-overlap metric.
 """
 
 import sys
@@ -31,10 +34,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from gpu_statmech.partition_function import H100_MEMORY_LEVELS, H100_SM_CONFIG
 from gpu_statmech.carnot import derive_carnot_limit
-from gpu_statmech.multi_gpu import TopologyGraph, derive_multi_gpu_carnot_limit
+from gpu_statmech.multi_gpu import (
+    TopologyGraph,
+    derive_multi_gpu_carnot_limit,
+    normalise_comm_demand,
+)
+from gpu_statmech.parallelism import (
+    LLAMA_7B,
+    ParallelismConfig,
+    estimate_comm_volumes,
+    estimate_compute_time_s,
+)
 
 FIGURES = Path(__file__).parent / "figures"
 FIGURES.mkdir(exist_ok=True)
+N_BETA = 20
+N_BINS = 16
 
 print("=" * 60)
 print("Experiment 03: Multi-GPU Scaling Efficiency")
@@ -44,11 +59,13 @@ print("=" * 60)
 # Single-GPU reference limit (computed once)
 # ---------------------------------------------------------------------------
 
-single_limit = derive_carnot_limit(n_beta=80, n_bins=32)
+single_limit = derive_carnot_limit(n_beta=N_BETA, n_bins=N_BINS)
 eta_single   = single_limit.eta_hw_max
 print(f"\n  Single-GPU η_hw,max = {eta_single:.4f}  ({eta_single*100:.2f}%)")
-print("  Note: multi-GPU values below use the energy-based <W_hw>/<E_in> limit.")
-print("        The balance proxy is not a timing-overlap prediction.")
+print("  Canonical workload: LLaMA-7B, pure data parallelism (DP-n).")
+print("  target_comm_load is derived from per-step communication bytes divided by")
+print("  the reference-link capacity over the estimated compute window.")
+print("  The balance proxy is not a timing-overlap prediction.")
 
 # ---------------------------------------------------------------------------
 # GPU counts and topology builders
@@ -90,13 +107,19 @@ results: dict[str, dict] = {name: {
 
 for n in n_gpu_values:
     print(f"\n  n_gpu = {n}")
+    dp_config = ParallelismConfig(dp=n)
+    comm_volumes = estimate_comm_volumes(dp_config, LLAMA_7B)
+    t_compute_ref = estimate_compute_time_s(dp_config, LLAMA_7B, eta_hw=eta_single)
+    target_comm_load = normalise_comm_demand(comm_volumes.total_bytes, t_compute_ref)
+    print(f"    target_comm_load={target_comm_load:.4f}  bytes/step={comm_volumes.total_bytes/1e9:.2f} GB")
     for topo_name, builder in TOPOLOGIES.items():
         topo = TopologyGraph(n_gpu=1, links=[], name="single_gpu") if n == 1 else builder(n)
         limit = derive_multi_gpu_carnot_limit(
             topo,
             eta_hw_max_single=eta_single,
             target_activity=single_limit.target_activity,
-            n_beta=80, n_bins=32,
+            target_comm_load=target_comm_load,
+            n_beta=N_BETA, n_bins=N_BINS,
         )
         r = results[topo_name]
         r["eta_multi_max"].append(limit.eta_multi_max)

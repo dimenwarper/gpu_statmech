@@ -51,6 +51,7 @@ from .multi_gpu import (
     MultiGPUCarnotLimit,
     TopologyGraph,
     derive_multi_gpu_carnot_limit,
+    normalise_comm_demand,
     resonance_condition,
 )
 
@@ -523,6 +524,7 @@ def score_config(
         config, model, sm_config, eta_hw_single, peak_tflops,
     )
     t_comm = estimate_comm_time_s(comm_volumes, topology)
+    target_comm_load = normalise_comm_demand(comm_volumes.total_bytes, t_compute)
 
     # η_overlap measures compute–communication balance
     eta_overlap = resonance_condition(t_compute, t_comm, overlap_fraction=1.0)
@@ -535,6 +537,7 @@ def score_config(
     multi_limit = derive_multi_gpu_carnot_limit(
         topology, sm_config, memory_levels,
         eta_hw_max_single=eta_hw_single,
+        target_comm_load=target_comm_load,
         n_beta=n_beta, n_bins=n_bins,
     )
 

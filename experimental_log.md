@@ -27,11 +27,12 @@
 - The fixed-load closure removes the arbitrary free-field sweep and makes `h` an interpretable operating-point variable.
 - With the current normalized energy tables, the fixed-load Carnot sweep still peaks at the upper beta boundary (`beta = 10.0` for the default sweep). The closure fixes the interpretation of `h`, but it does not by itself create an interior beta optimum.
 - The single-GPU and multi-GPU paths are now both expressed in `<W_hw> / <E_in>` terms.
-- The remaining weak spot in the multi-GPU theory is not the efficiency definition anymore; it is the lack of a fixed communication-demand closure. Topology-only sweeps therefore remain close to the single-GPU ceiling.
+- The multi-GPU path now also has a fixed communication-demand closure.
+- The remaining weak spot in the multi-GPU theory is now the coarseness of the communication model: routing, congestion, and collective schedule details are still collapsed into a simple topology-level field.
 
 ### Validation
 
-- `uv run pytest -q` -> `363 passed`
+- `uv run pytest -q` -> `366 passed`
 
 ### Experiment clean-up
 
@@ -60,4 +61,13 @@
   - the communication subsystem now folds link bandwidth and latency into the effective link cost instead of using only `J`
   - `derive_multi_gpu_carnot_limit()` now maximizes `eta_multi = <W_hw>/<E_in>` instead of `1 - mean_waste`
 - Updated `experiments/theoretical_calculations/03_scaling_efficiency.py` to use the energy-based multi-GPU ceiling and to report communication energy share instead of the old log-share language.
-- Re-ran experiment 03. The result is now theoretically consistent with the refactor, but still nearly flat across topologies because the model does not yet enforce a communication-demand closure.
+- Re-ran experiment 03. The result is now theoretically consistent with the refactor, but still nearly flat across topologies because the model did not yet enforce a communication-demand closure.
+
+### Communication-demand closure
+
+- Added a first communication-demand closure to `multi_gpu.py`:
+  - `normalise_comm_demand(total_bytes, reference_window_s)` converts workload bytes into a dimensionless communication pressure.
+  - `solve_comm_field(beta, target_comm_load, topology)` solves the communication field `g` so the topology actually carries the required load.
+  - the communication partition now uses `exp[-beta (J_eff - g alpha) u]` per link, where `alpha` is the normalized delivered service of the link.
+- Updated `parallelism.py` so topology Carnot limits are now evaluated at workload-derived communication pressure rather than zero-demand topology-only sweeps.
+- Updated experiment 03 to use a canonical LLaMA-7B pure-DP communication load. Topology differences now move in the right direction (NVLink/NVSwitch best, InfiniBand worst), but the gap is still modest because pure DP is a relatively light communication workload and the model still lacks collective-aware routing/congestion.

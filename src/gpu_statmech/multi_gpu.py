@@ -221,6 +221,11 @@ def _effective_link_cost(link: LinkConfig) -> float:
     return link.coupling_J * transfer_penalty
 
 
+def _link_service_capacity(link: LinkConfig) -> float:
+    """Normalized communication service delivered by one active link."""
+    return link.bandwidth_gb_s / max(_REFERENCE_LINK_BW_GB_S, 1e-12)
+
+
 def _topology_activity_normalizer(topology: TopologyGraph) -> float:
     """
     Approximate how many outgoing links per GPU can be active in one comm phase.
@@ -233,6 +238,71 @@ def _topology_activity_normalizer(topology: TopologyGraph) -> float:
         return 1.0
     mean_out_degree = len(topology.links) / max(float(topology.n_gpu), 1.0)
     return max(mean_out_degree, 1.0)
+
+
+def normalise_comm_demand(
+    total_bytes: float,
+    reference_window_s: float,
+    reference_bandwidth_gb_s: float | None = None,
+) -> float:
+    """
+    Convert a communication volume into a dimensionless load fraction.
+
+    This is the fraction of the fastest-reference link that would be occupied
+    over a reference time window if it alone carried the required bytes:
+
+        load = total_bytes / (BW_ref * window)
+    """
+    if total_bytes <= 0.0 or reference_window_s <= 0.0:
+        return 0.0
+    if reference_bandwidth_gb_s is None:
+        reference_bandwidth_gb_s = _REFERENCE_LINK_BW_GB_S
+    bw_bytes_s = max(reference_bandwidth_gb_s * 1e9, 1.0)
+    return total_bytes / (bw_bytes_s * reference_window_s)
+
+
+def _log_z_link(
+    beta: float,
+    link: LinkConfig,
+    comm_field: float = 0.0,
+) -> float:
+    """Stable log-partition for one communication link."""
+    coeff = beta * (
+        _effective_link_cost(link) - comm_field * _link_service_capacity(link)
+    )
+    if abs(coeff) < 1e-10:
+        return 0.0
+    if coeff > 50.0:
+        return -math.log(coeff)
+    if coeff < -50.0:
+        return -coeff - math.log(-coeff)
+    z_link = (1.0 - math.exp(-coeff)) / coeff
+    return math.log(max(z_link, 1e-300))
+
+
+def _mean_link_utilization(
+    beta: float,
+    link: LinkConfig,
+    comm_field: float = 0.0,
+) -> float:
+    """
+    Expected normalized utilization for one directed communication link.
+
+    With ``a = beta * (J_eff - g alpha)``:
+
+        <u> = 1/a - 1/(exp(a) - 1)
+    """
+    a = beta * (
+        _effective_link_cost(link) - comm_field * _link_service_capacity(link)
+    )
+    if abs(a) < 1e-6:
+        return 0.5
+    if a > 50.0:
+        return float(np.clip(1.0 / a, 0.0, 1.0))
+    if a < -50.0:
+        return float(np.clip(1.0 + 1.0 / a, 0.0, 1.0))
+    util = 1.0 / a - 1.0 / math.expm1(a)
+    return float(np.clip(util, 0.0, 1.0))
 
 
 def _mean_link_input_energy(beta: float, link: LinkConfig) -> float:
@@ -257,6 +327,120 @@ def _mean_link_input_energy(beta: float, link: LinkConfig) -> float:
     return max(1.0 / max(beta, 1e-12) - j_eff / math.expm1(beta_eff), 0.0)
 
 
+def _mean_link_input_energy_with_field(
+    beta: float,
+    link: LinkConfig,
+    comm_field: float = 0.0,
+) -> float:
+    """Expected input energy for one link under a communication field."""
+    return _effective_link_cost(link) * _mean_link_utilization(beta, link, comm_field)
+
+
+def _mean_link_comm_load(
+    beta: float,
+    link: LinkConfig,
+    comm_field: float = 0.0,
+) -> float:
+    """Expected delivered communication service for one link."""
+    return _link_service_capacity(link) * _mean_link_utilization(beta, link, comm_field)
+
+
+def mean_topology_comm_load(
+    beta: float,
+    topology: TopologyGraph,
+    comm_field: float = 0.0,
+) -> float:
+    """
+    Mean normalized communication service per GPU-phase.
+
+    This averages delivered per-link service over the effective number of
+    active outgoing routes, so dense fabrics expose more capacity rather than
+    being charged as if every route were mandatory.
+    """
+    if not topology.links:
+        return 0.0
+    denom = max(float(topology.n_gpu) * _topology_activity_normalizer(topology), 1.0)
+    return sum(
+        _mean_link_comm_load(beta, edge.link, comm_field) for edge in topology.links
+    ) / denom
+
+
+def solve_comm_field(
+    beta: float,
+    target_comm_load: float,
+    topology: TopologyGraph,
+    tol: float = 1e-6,
+    max_iter: int = 64,
+) -> float:
+    """
+    Solve for the communication field g that yields a target comm load.
+
+    The closure is:
+
+        <C_comm>(beta, g) = target_comm_load
+    """
+    if target_comm_load < 0.0:
+        raise ValueError("target_comm_load must be non-negative")
+    if target_comm_load <= tol or not topology.links:
+        return 0.0
+
+    def load_at(comm_field: float) -> float:
+        return mean_topology_comm_load(beta, topology, comm_field)
+
+    lo = -4.0
+    hi = 4.0
+    load_lo = load_at(lo)
+    load_hi = load_at(hi)
+
+    for _ in range(32):
+        if load_lo <= target_comm_load <= load_hi:
+            break
+        if target_comm_load < load_lo:
+            hi = lo
+            load_hi = load_lo
+            lo *= 2.0
+            load_lo = load_at(lo)
+        else:
+            lo = hi
+            load_lo = load_hi
+            hi *= 2.0
+            load_hi = load_at(hi)
+    else:
+        raise ValueError(
+            "target_comm_load is outside the attainable range "
+            f"[{load_lo:.6f}, {load_hi:.6f}] at beta={beta:.6f}"
+        )
+
+    if abs(load_lo - target_comm_load) <= tol:
+        return lo
+    if abs(load_hi - target_comm_load) <= tol:
+        return hi
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        load_mid = load_at(mid)
+        if abs(load_mid - target_comm_load) <= tol:
+            return mid
+        if load_mid < target_comm_load:
+            lo = mid
+        else:
+            hi = mid
+
+    return 0.5 * (lo + hi)
+
+
+def _resolve_operating_comm_field(
+    beta: float,
+    topology: TopologyGraph,
+    comm_field: float = 0.0,
+    target_comm_load: float | None = None,
+) -> float:
+    """Resolve the communication field for the current operating point."""
+    if target_comm_load is not None:
+        return solve_comm_field(beta, target_comm_load, topology)
+    return comm_field
+
+
 @dataclass
 class MultiGPUThermodynamicState:
     """
@@ -277,13 +461,16 @@ class MultiGPUThermodynamicState:
     log_Z_comm_topo: float   # ln Z_comm_topology (inter-GPU communication)
 
     work_field: float
+    comm_field: float
     memory_feed_efficiency: float
     target_activity: float | None
+    target_comm_load: float | None
 
     mean_effective_energy: float
     mean_input_energy: float
     mean_useful_work: float
     mean_comm_input_energy: float
+    mean_comm_load: float
     mean_waste: float
     mean_activity: float
     free_energy: float       # F_multi / (β × n_dof_total)
@@ -302,6 +489,7 @@ class MultiGPUThermodynamicState:
 def _log_z_comm_topology(
     beta: float,
     topology: TopologyGraph,
+    comm_field: float = 0.0,
 ) -> float:
     """
     ln Z_comm_topology(β) = Σ_{(i,j)∈E} ln Z_link(β, J_eff,ij)
@@ -320,12 +508,7 @@ def _log_z_comm_topology(
     """
     log_z = 0.0
     for edge in topology.links:
-        bj = beta * _effective_link_cost(edge.link)
-        if bj < 1e-10:
-            z_link = 1.0
-        else:
-            z_link = (1.0 - math.exp(-bj)) / bj
-        log_z += math.log(max(z_link, 1e-300))
+        log_z += _log_z_link(beta, edge.link, comm_field)
     return log_z / _topology_activity_normalizer(topology)
 
 
@@ -338,6 +521,8 @@ def log_z_multi_gpu(
     work_field: float = 0.0,
     activity_potential: float | None = None,
     target_activity: float | None = None,
+    comm_field: float = 0.0,
+    target_comm_load: float | None = None,
 ) -> tuple[float, float, float]:
     """
     Compute ln Z_multi for the N-GPU coupled system.
@@ -368,7 +553,13 @@ def log_z_multi_gpu(
         target_activity=target_activity,
     )
     log_z_local = topology.n_gpu * log_z_single
-    log_z_comm_topo = _log_z_comm_topology(beta, topology)
+    resolved_comm_field = _resolve_operating_comm_field(
+        beta,
+        topology,
+        comm_field=comm_field,
+        target_comm_load=target_comm_load,
+    )
+    log_z_comm_topo = _log_z_comm_topology(beta, topology, resolved_comm_field)
     log_z_multi = log_z_local + log_z_comm_topo
 
     return log_z_multi, log_z_local, log_z_comm_topo
@@ -384,6 +575,8 @@ def multi_gpu_thermodynamic_quantities(
     work_field: float = 0.0,
     activity_potential: float | None = None,
     target_activity: float | None = None,
+    comm_field: float = 0.0,
+    target_comm_load: float | None = None,
 ) -> MultiGPUThermodynamicState:
     """
     Compute all multi-GPU thermodynamic quantities at inverse temperature β.
@@ -422,6 +615,12 @@ def multi_gpu_thermodynamic_quantities(
         activity_potential=activity_potential,
         target_activity=target_activity,
     )
+    resolved_comm_field = _resolve_operating_comm_field(
+        beta,
+        topology,
+        comm_field=comm_field,
+        target_comm_load=target_comm_load,
+    )
 
     def ln_z(b: float) -> float:
         lzm, _, _ = log_z_multi_gpu(
@@ -433,6 +632,8 @@ def multi_gpu_thermodynamic_quantities(
             work_field=work_field,
             activity_potential=activity_potential,
             target_activity=target_activity,
+            comm_field=comm_field,
+            target_comm_load=target_comm_load,
         )
         return lzm
 
@@ -451,8 +652,10 @@ def multi_gpu_thermodynamic_quantities(
 
     free_energy = -lz / (max(beta, 1e-12) * n_dof_total)
     mean_comm_input_energy = sum(
-        _mean_link_input_energy(beta, edge.link) for edge in topology.links
+        _mean_link_input_energy_with_field(beta, edge.link, resolved_comm_field)
+        for edge in topology.links
     ) / max(n_dof_total * _topology_activity_normalizer(topology), 1.0)
+    mean_comm_load = mean_topology_comm_load(beta, topology, resolved_comm_field)
     mean_input_energy = local_state.mean_input_energy + mean_comm_input_energy
     mean_useful_work = local_state.mean_useful_work
     mean_waste = max(mean_input_energy - mean_useful_work, 0.0)
@@ -467,6 +670,8 @@ def multi_gpu_thermodynamic_quantities(
         work_field=work_field,
         activity_potential=activity_potential,
         target_activity=target_activity,
+        comm_field=comm_field,
+        target_comm_load=target_comm_load,
     )
 
     return MultiGPUThermodynamicState(
@@ -476,12 +681,15 @@ def multi_gpu_thermodynamic_quantities(
         log_Z_local=log_z_local,
         log_Z_comm_topo=log_z_comm_topo,
         work_field=local_state.work_field,
+        comm_field=resolved_comm_field,
         memory_feed_efficiency=local_state.memory_feed_efficiency,
         target_activity=local_state.target_activity,
+        target_comm_load=target_comm_load,
         mean_effective_energy=mean_effective_energy,
         mean_input_energy=mean_input_energy,
         mean_useful_work=mean_useful_work,
         mean_comm_input_energy=mean_comm_input_energy,
+        mean_comm_load=mean_comm_load,
         mean_waste=mean_waste,
         mean_activity=local_state.mean_activity,
         free_energy=free_energy,
@@ -511,6 +719,8 @@ class MultiGPUCarnotLimit:
     eta_multi_max: float           # ∈ [0, 1]
     eta_hw_max_single: float       # single-GPU reference ∈ [0, 1]
     beta_optimal: float            # β at which η_multi_max is achieved
+    comm_field_optimal: float      # g at the optimal operating point
+    target_comm_load: float | None
     resonance_eta: float           # η_overlap ∈ [0, 1]
     comm_overhead_fraction: float  # fraction of total input energy in comm ∈ [0, 1]
     topology: TopologyGraph
@@ -533,6 +743,7 @@ class MultiGPUCarnotLimit:
             f"  η_hw,max (1-GPU) = {self.eta_hw_max_single:.4f}",
             f"  scaling eff.     = {self.scaling_efficiency():.4f}",
             f"  β_optimal        = {self.beta_optimal:.4f}",
+            f"  g_optimal        = {self.comm_field_optimal:.4f}",
             f"  η_overlap proxy  = {self.resonance_eta:.4f}",
             f"  comm energy      = {self.comm_overhead_fraction * 100:.1f}%",
             f"  mean J           = {self.topology.mean_J():.3f}",
@@ -598,6 +809,8 @@ def derive_multi_gpu_carnot_limit(
     work_field: float | None = None,
     activity_potential: float | None = None,
     target_activity: float | None = None,
+    comm_field: float | None = None,
+    target_comm_load: float | None = None,
 ) -> MultiGPUCarnotLimit:
     """
     Derive η_multi,max for N coupled GPUs from the partition function.
@@ -629,6 +842,8 @@ def derive_multi_gpu_carnot_limit(
         work_field:          Fixed useful-work field ``h``.
         activity_potential:  Backwards-compatible alias for ``work_field``.
         target_activity:     Fixed-load closure for solving ``h(β)``.
+        comm_field:          Fixed communication field ``g``.
+        target_comm_load:    Fixed communication-load closure.
 
     Returns:
         MultiGPUCarnotLimit with all derived quantities.
@@ -672,6 +887,8 @@ def derive_multi_gpu_carnot_limit(
             work_field=work_field or 0.0,
             activity_potential=activity_potential,
             target_activity=target_activity,
+            comm_field=comm_field or 0.0,
+            target_comm_load=target_comm_load,
         )
         eta = max(0.0, min(1.0, state.eta_multi))
         if eta > best_eta:
@@ -694,6 +911,8 @@ def derive_multi_gpu_carnot_limit(
         eta_multi_max=max(0.0, min(best_eta, 1.0)),
         eta_hw_max_single=eta_hw_max_single,
         beta_optimal=best_beta,
+        comm_field_optimal=best_state.comm_field,
+        target_comm_load=target_comm_load,
         resonance_eta=resonance_eta,
         comm_overhead_fraction=comm_overhead,
         topology=topology,

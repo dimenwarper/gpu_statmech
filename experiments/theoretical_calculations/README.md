@@ -21,9 +21,9 @@ Current caveats:
 - Experiment 01 now also includes a first-order memory-feed closure, so the
   reported single-GPU efficiency is lower than the earlier compute-only value.
 - Experiment 02 removes the old "min reuse" claim because that formula is not yet calibrated as a literal reuse count.
-- Experiment 03 now uses the energy-based multi-GPU limit, but it still lacks
-  a fixed communication-demand closure; topology-only sweeps therefore stay
-  close to the single-GPU ceiling.
+- Experiment 03 now uses the energy-based multi-GPU limit with a fixed
+  communication-demand closure derived from a canonical workload. The current
+  caveat is no longer missing demand, but still-coarse topology modeling.
 
 ## Experiments
 
@@ -83,28 +83,31 @@ underlying formula is recalibrated as a true dimensionless reuse count.
 ### 03 — Multi-GPU Scaling Efficiency [`03_scaling_efficiency.py`](03_scaling_efficiency.py)
 
 Runs the energy-based multi-GPU limit for 1→64 GPUs across four interconnect
-topologies using the coupled partition function
-`ln Z_multi = N × ln Z_single + ln Z_comm_topology`.
+topologies under a canonical distributed-training communication load:
+LLaMA-7B with pure data parallelism (DP-n). The communication-demand closure is
+
+`target_comm_load = total_bytes / (BW_ref × T_compute_ref)`
+
+so every topology is evaluated at the same workload-implied communication
+pressure, not just as a bare graph.
 
 **Key result:** The multi-GPU path now uses the same `<W_hw>/<E_in>` framing
-as the single-GPU model and folds link bandwidth/latency into the effective
-communication cost. But because the model still lacks a fixed
-communication-demand closure, the bare-topology sweep remains very close to
-the single-GPU ceiling (**0.1650**) for all topologies. The only visible
-differences are small balance-proxy and communication-energy shifts, with
-InfiniBand worst at 64 GPUs.
+as the single-GPU model, folds link bandwidth/latency into the effective
+communication cost, and solves a communication field to match the required
+load. Under this canonical DP workload, topology differences are finally
+non-flat but still modest: NVLink/NVSwitch stay essentially at the single-GPU
+ceiling, PCIe degrades slightly, and InfiniBand is worst by 64 GPUs.
 
 | Topology | η_multi,max @ 64 GPU | scaling_eff | balance proxy | comm energy |
 |---|---|---|---|---|
-| NVLink-4 clique | 0.1650 | 0.9999 | 0.0007 | 0.0% |
-| NVSwitch fabric | 0.1650 | 0.9999 | 0.0007 | 0.0% |
-| PCIe Gen5 ring | 0.1650 | 0.9999 | 0.0016 | 0.0% |
-| InfiniBand fat-tree | 0.1650 | 0.9999 | 0.0016 | 0.0% |
+| NVLink-4 clique | 0.1661 | 1.0000 | 0.0000 | 0.0% |
+| NVSwitch fabric | 0.1661 | 1.0000 | 0.0000 | 0.0% |
+| PCIe Gen5 ring | 0.1660 | 0.9995 | 0.0057 | 0.0% |
+| InfiniBand fat-tree | 0.1657 | 0.9974 | 0.0308 | 0.3% |
 
-Treat this as a topology-aware energy envelope, not a workload-aware scaling
-prediction. To make experiment 03 truly discriminative, the next missing
-piece is a communication-load closure analogous to the fixed activity closure
-used in experiment 01.
+The next missing physics is not demand closure anymore; it is richer
+collective-aware routing and congestion. A heavier TP/EP-style workload should
+also separate the topologies much more strongly than this DP example.
 
 **Figure:** `figures/03_scaling_efficiency.png`
 

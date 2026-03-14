@@ -322,6 +322,36 @@ class TestMultiGPUThermodynamicQuantities:
         frac = state_2gpu.mean_comm_input_energy / max(state_2gpu.mean_input_energy, 1e-12)
         assert 0.0 <= frac <= 1.0 + 1e-6
 
+    def test_target_comm_load_closure_matches_target(self):
+        g = TopologyGraph.nvlink_clique(2)
+        state = multi_gpu_thermodynamic_quantities(
+            1.0, g, _TINY_SM, _TINY_MEM, n_bins=16, target_comm_load=0.20,
+        )
+        assert state.mean_comm_load == pytest.approx(0.20, abs=1e-4)
+
+    def test_comm_input_energy_increases_with_target_comm_load(self):
+        g = TopologyGraph.nvlink_clique(2)
+        s_low = multi_gpu_thermodynamic_quantities(
+            1.0, g, _TINY_SM, _TINY_MEM, n_bins=16, target_comm_load=0.05,
+        )
+        s_high = multi_gpu_thermodynamic_quantities(
+            1.0, g, _TINY_SM, _TINY_MEM, n_bins=16, target_comm_load=0.40,
+        )
+        assert s_high.mean_comm_input_energy > s_low.mean_comm_input_energy
+
+    def test_slower_links_require_larger_comm_field(self):
+        beta = 1.0
+        target_comm_load = 0.05
+        g_nvlink = TopologyGraph.nvlink_clique(2)
+        g_pcie = TopologyGraph.pcie_ring(2)
+        s_nvlink = multi_gpu_thermodynamic_quantities(
+            beta, g_nvlink, _TINY_SM, _TINY_MEM, n_bins=16, target_comm_load=target_comm_load,
+        )
+        s_pcie = multi_gpu_thermodynamic_quantities(
+            beta, g_pcie, _TINY_SM, _TINY_MEM, n_bins=16, target_comm_load=target_comm_load,
+        )
+        assert s_pcie.comm_field > s_nvlink.comm_field
+
 
 # ---------------------------------------------------------------------------
 # resonance_condition
@@ -427,12 +457,14 @@ class TestMultiGPUCarnotLimit:
         assert "η_multi,max" in s
         assert "scaling" in s
         assert "β_optimal" in s
+        assert "g_optimal" in s
 
     def test_thermo_state_is_consistent(self, nvlink_limit):
         st = nvlink_limit.thermo_state
         assert st.beta == pytest.approx(nvlink_limit.beta_optimal)
         assert 0.0 <= st.mean_waste <= 1.0
         assert nvlink_limit.eta_multi_max == pytest.approx(st.eta_multi, abs=1e-6)
+        assert st.comm_field == pytest.approx(nvlink_limit.comm_field_optimal)
 
 
 # ---------------------------------------------------------------------------

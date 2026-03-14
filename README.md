@@ -60,7 +60,8 @@ Current status:
   single-GPU path.
 - The compiler/search layer now uses an architecture-facing proxy score
   rather than a pure "expressiveness" heuristic.
-- Multi-GPU still uses a legacy waste-based proxy and needs the same `<W_hw>/<E_in>` refactor.
+- Multi-GPU now uses the same `<W_hw>/<E_in>` framing together with a first
+  fixed communication-load closure.
 - Recent theory changes and experiment notes are tracked in [`experimental_log.md`](experimental_log.md).
 
 ---
@@ -124,10 +125,10 @@ Wraps the gpusim Python API and adds:
 - Resonance condition: η_overlap = T_overlapped / max(T_compute, T_comm)
 - Parallelism optimizer: enumerate (dp, tp, pp, ep, cp) configs, score each by η_multi
 
-Current caveat: the multi-GPU path now uses the same `E_in - h W_hw`
-framing as the single-GPU model, but it still lacks a fixed
-communication-demand closure. Bare-topology sweeps therefore stay close to
-the single-GPU limit unless a workload-specific communication model is added.
+Current caveat: the multi-GPU path now has a fixed communication-load
+closure, but the communication model is still coarse. It does not yet model
+collective-specific routing, congestion, or algorithmic schedule details, so
+topology effects remain modest for light-demand workloads like pure DP.
 
 **Deliverables:** `src/gpu_statmech/multi_gpu.py`, `src/gpu_statmech/parallelism.py`
 
