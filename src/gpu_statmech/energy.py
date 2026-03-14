@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .observables import canonicalize_snapshot
+
 
 # ---------------------------------------------------------------------------
 # Energy cost parameters (H100 SXM5)
@@ -134,16 +136,18 @@ def compute_energy(
     if params is None:
         params = H100_ENERGY_PARAMS
 
+    snap = canonicalize_snapshot(snapshot)
+
     # Extract snapshot fields with defaults
-    cycle           = float(snapshot.get("cycle", 1))
-    active_warps    = float(snapshot.get("active_warps", 0.5))    # fraction [0,1]
-    stall_frac      = float(snapshot.get("stall_fraction", 0.2))
-    instr_mix       = snapshot.get("instr_mix", {})
-    l2_hit_rate     = float(snapshot.get("l2_hit_rate", 0.8))
-    hbm_bw_util     = float(snapshot.get("hbm_bw_util", 0.3))
-    smem_util       = float(snapshot.get("smem_util", 0.5))
-    blocks          = int(snapshot.get("blocks_executed", 1))
-    threads_per_blk = int(snapshot.get("threads_per_block", 128))
+    cycle           = float(snap.get("cycle", 1))
+    active_warps    = float(snap.get("active_warps", 0.5))    # fraction [0,1]
+    stall_frac      = float(snap.get("stall_fraction", 0.2))
+    instr_mix       = snap.get("instr_mix", {})
+    l2_hit_rate     = float(snap.get("l2_hit_rate", 0.8))
+    hbm_bw_util     = float(snap.get("hbm_bw_util", 0.3))
+    smem_util       = float(snap.get("smem_util", 0.5))
+    blocks          = int(snap.get("blocks_executed", 1))
+    threads_per_blk = int(snap.get("threads_per_block", 128))
 
     # Instruction mix fractions (default to an all-fp32 mix)
     f_fp16 = float(instr_mix.get("fp16", 0.0))

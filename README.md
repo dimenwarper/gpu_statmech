@@ -62,6 +62,9 @@ Current status:
   rather than a pure "expressiveness" heuristic.
 - Multi-GPU now uses the same `<W_hw>/<E_in>` framing together with a first
   fixed communication-load closure.
+- The simulator-facing path now accepts raw `gpusim` snapshots directly and
+  includes an observable-matching operating-point inference path in addition
+  to the older crude waste-logit estimate.
 - Recent theory changes and experiment notes are tracked in [`experimental_log.md`](experimental_log.md).
 
 ---

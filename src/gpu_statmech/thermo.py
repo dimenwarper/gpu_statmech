@@ -23,12 +23,14 @@ import numpy as np
 
 from .carnot import CarnotLimit, derive_carnot_limit
 from .energy import EnergyDecomposition, EnergyParams, aggregate_energy, compute_energy
+from .observables import TraceObservables, aggregate_trace_observables, canonicalize_snapshot
 from .partition_function import (
     H100_MEMORY_LEVELS,
     H100_SM_CONFIG,
     MemoryLevel,
     SMConfig,
     ThermodynamicState,
+    mean_compute_mem_stall_fraction,
     thermodynamic_quantities,
 )
 
@@ -44,6 +46,11 @@ class ExecutionPhase:
     MIXED          = "mixed"
 
 
+class BetaInferenceMethod:
+    OBSERVABLE_MATCH = "observable_match"
+    CRUDE_WASTE_LOGIT = "crude_waste_logit"
+
+
 def classify_phase(
     snapshot: dict[str, Any],
     carnot_limit: CarnotLimit,
@@ -57,9 +64,10 @@ def classify_phase(
       - Latency-bound:  stall_fraction > 0.4  AND  active_warps < min_occupancy
       - Mixed:          everything else
     """
-    stall = float(snapshot.get("stall_fraction", 0.0))
-    bw    = float(snapshot.get("hbm_bw_util", 0.0))
-    occ   = float(snapshot.get("active_warps", 1.0))
+    snap = canonicalize_snapshot(snapshot)
+    stall = float(snap.get("stall_fraction", 0.0))
+    bw    = float(snap.get("hbm_bw_util", 0.0))
+    occ   = float(snap.get("active_warps", 1.0))
     min_occ = carnot_limit.min_warp_occupancy
 
     if bw > 0.7:
@@ -211,8 +219,9 @@ def estimate_entropy(
     n_bins = 10
     counts = np.zeros((n_bins, n_bins), dtype=np.float64)
     for s in snapshots:
-        aw = float(s.get("active_warps", 0.5))
-        sf = float(s.get("stall_fraction", 0.2))
+        snap = canonicalize_snapshot(s)
+        aw = float(snap.get("active_warps", 0.5))
+        sf = float(snap.get("stall_fraction", 0.2))
         i = min(int(aw * n_bins), n_bins - 1)
         j = min(int(sf * n_bins), n_bins - 1)
         counts[i, j] += 1.0
@@ -253,9 +262,12 @@ class KernelThermoAnalysis:
 
     # Entropy
     execution_entropy: float
+    observables: TraceObservables
 
     # Thermodynamic state at the observed operating point
     thermo_state: ThermodynamicState
+    beta_inference_method: str
+    beta_inference_error: float
 
 
 @dataclass
@@ -317,6 +329,10 @@ def analyse_kernel(
     sm_config: SMConfig | None = None,
     memory_levels: list[MemoryLevel] | None = None,
     energy_params: EnergyParams | None = None,
+    beta_inference_method: str = BetaInferenceMethod.OBSERVABLE_MATCH,
+    beta_min: float = 0.01,
+    beta_max: float = 10.0,
+    n_beta: int = 200,
 ) -> KernelThermoAnalysis:
     """
     Full thermodynamic analysis for a single kernel from its snapshot trace.
@@ -333,6 +349,8 @@ def analyse_kernel(
         memory_levels = H100_MEMORY_LEVELS
     if carnot_limit is None:
         carnot_limit = derive_carnot_limit(sm_config, memory_levels)
+
+    observables = aggregate_trace_observables(snapshots)
 
     # Energy
     energy = aggregate_energy(snapshots, n_sm=sm_config.n_sm,
@@ -353,17 +371,70 @@ def analyse_kernel(
     # Entropy
     entropy = estimate_entropy(snapshots)
 
-    # Thermodynamic state at the observed β
-    # Infer β from the mean waste fraction: <E(β)> = waste_fraction → solve for β
-    wf = energy.waste_fraction
-    # For our normalised system, <E(β)> ≈ 1/(1 + exp(β)) for a two-state system
-    # Invert: β ≈ log((1 - wf) / wf)
-    beta_obs = math.log(max(1e-6, (1.0 - wf) / max(wf, 1e-6)))
-    thermo_state = thermodynamic_quantities(
-        beta=max(0.01, beta_obs),
-        sm_config=sm_config,
-        memory_levels=memory_levels,
-    )
+    hbm_bw = memory_levels[-1].bandwidth_bytes_per_cycle
+
+    # Thermodynamic state at the observed operating point
+    if beta_inference_method == BetaInferenceMethod.CRUDE_WASTE_LOGIT:
+        wf = energy.waste_fraction
+        beta_obs = math.log(max(1e-6, (1.0 - wf) / max(wf, 1e-6)))
+        thermo_state = thermodynamic_quantities(
+            beta=max(beta_min, beta_obs),
+            sm_config=sm_config,
+            memory_levels=memory_levels,
+        )
+        beta_inference_error = 0.0
+    elif beta_inference_method == BetaInferenceMethod.OBSERVABLE_MATCH:
+        if observables.n_snapshots == 0 or observables.mean_issue_activity <= 1e-9:
+            thermo_state = thermodynamic_quantities(
+                beta=beta_min,
+                sm_config=sm_config,
+                memory_levels=memory_levels,
+                work_field=0.0,
+            )
+            beta_inference_error = 0.0
+            return KernelThermoAnalysis(
+                kernel_name=kernel_name,
+                eta_hw=energy.eta_hw,
+                eta_hw_max=carnot_limit.eta_hw_max,
+                eta_hw_fraction=energy.eta_hw / max(carnot_limit.eta_hw_max, 1e-12),
+                energy=energy,
+                dominant_phase=dominant_phase,
+                phase_distribution=phase_dist,
+                bottleneck=bottleneck,
+                execution_entropy=entropy,
+                observables=observables,
+                thermo_state=thermo_state,
+                beta_inference_method=beta_inference_method,
+                beta_inference_error=beta_inference_error,
+            )
+        betas = np.linspace(beta_min, beta_max, n_beta).tolist()
+        best_score = float("inf")
+        best_state: ThermodynamicState | None = None
+        for beta in betas:
+            state = thermodynamic_quantities(
+                beta=beta,
+                sm_config=sm_config,
+                memory_levels=memory_levels,
+                target_activity=observables.mean_issue_activity,
+            )
+            predicted_stall = mean_compute_mem_stall_fraction(
+                beta,
+                sm_config,
+                hbm_bw,
+                memory_levels=memory_levels,
+                target_activity=observables.mean_issue_activity,
+            )
+            stall_err = predicted_stall - observables.mean_stall_fraction
+            feed_err = state.memory_feed_efficiency - observables.memory_feed_efficiency_proxy
+            score = 2.0 * stall_err * stall_err + feed_err * feed_err
+            if score < best_score:
+                best_score = score
+                best_state = state
+        assert best_state is not None
+        thermo_state = best_state
+        beta_inference_error = best_score
+    else:
+        raise ValueError(f"unknown beta_inference_method: {beta_inference_method}")
 
     return KernelThermoAnalysis(
         kernel_name=kernel_name,
@@ -375,7 +446,10 @@ def analyse_kernel(
         phase_distribution=phase_dist,
         bottleneck=bottleneck,
         execution_entropy=entropy,
+        observables=observables,
         thermo_state=thermo_state,
+        beta_inference_method=beta_inference_method,
+        beta_inference_error=beta_inference_error,
     )
 
 
@@ -384,6 +458,10 @@ def analyse_protocol(
     carnot_limit: CarnotLimit | None = None,
     sm_config: SMConfig | None = None,
     memory_levels: list[MemoryLevel] | None = None,
+    beta_inference_method: str = BetaInferenceMethod.OBSERVABLE_MATCH,
+    beta_min: float = 0.01,
+    beta_max: float = 10.0,
+    n_beta: int = 200,
 ) -> ProtocolThermoAnalysis:
     """
     Analyse a full computation protocol as a sequence of named kernels.
@@ -400,7 +478,17 @@ def analyse_protocol(
         carnot_limit = derive_carnot_limit(sm_config, memory_levels)
 
     analyses = [
-        analyse_kernel(name, snaps, carnot_limit, sm_config, memory_levels)
+        analyse_kernel(
+            name,
+            snaps,
+            carnot_limit,
+            sm_config,
+            memory_levels,
+            beta_inference_method=beta_inference_method,
+            beta_min=beta_min,
+            beta_max=beta_max,
+            n_beta=n_beta,
+        )
         for name, snaps in kernel_traces.items()
     ]
     return ProtocolThermoAnalysis(kernel_analyses=analyses)

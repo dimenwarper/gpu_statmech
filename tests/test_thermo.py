@@ -15,6 +15,7 @@ import pytest
 
 from gpu_statmech.carnot import derive_carnot_limit
 from gpu_statmech.thermo import (
+    BetaInferenceMethod,
     ExecutionPhase,
     KernelThermoAnalysis,
     ProtocolThermoAnalysis,
@@ -53,6 +54,24 @@ def _snap(**overrides) -> dict:
         "smem_util":         0.4,
         "blocks_executed":   128,
         "threads_per_block": 256,
+    }
+    base.update(overrides)
+    return base
+
+
+def _gpusim_snap(**overrides) -> dict:
+    base = {
+        "cycle": 1,
+        "gpu_id": 0,
+        "sm_active_warps": [24, 20, 16, 12],
+        "sm_max_warps": 64,
+        "sm_instr_mix": [{"fp32": 1.0, "fp16": 0.0, "int": 0.0, "sfu": 0.0, "mem": 0.0, "tensor_core": 0.0}] * 4,
+        "sm_stall_frac": [0.2, 0.3, 0.2, 0.3],
+        "reg_utilization": 0.4,
+        "smem_utilization": 0.5,
+        "l2_hit_rate": 0.7,
+        "hbm_bw_utilization": 0.3,
+        "bw_nvlink": 0.0,
     }
     base.update(overrides)
     return base
@@ -152,6 +171,29 @@ class TestAnalyseKernel:
     def test_phase_distribution_sums_to_one(self, analysis):
         total = sum(analysis.phase_distribution.values())
         assert abs(total - 1.0) < 1e-9
+
+    def test_observable_match_is_default(self, analysis):
+        assert analysis.beta_inference_method == BetaInferenceMethod.OBSERVABLE_MATCH
+        assert analysis.beta_inference_error >= 0.0
+
+    def test_crude_beta_inference_still_available(self, limit):
+        analysis = analyse_kernel(
+            "crude",
+            [_snap()] * 4,
+            carnot_limit=limit,
+            beta_inference_method=BetaInferenceMethod.CRUDE_WASTE_LOGIT,
+        )
+        assert analysis.beta_inference_method == BetaInferenceMethod.CRUDE_WASTE_LOGIT
+        assert analysis.thermo_state.beta >= 0.01
+
+    def test_accepts_raw_gpusim_snapshot_schema(self, limit):
+        analysis = analyse_kernel("gpusim", [_gpusim_snap()] * 4, carnot_limit=limit)
+        assert 0.0 <= analysis.observables.mean_active_warp_fraction <= 1.0
+        assert 0.0 <= analysis.observables.mean_stall_fraction <= 1.0
+        assert analysis.thermo_state.target_activity == pytest.approx(
+            analysis.observables.mean_issue_activity,
+            abs=1e-3,
+        )
 
 
 # ---------------------------------------------------------------------------

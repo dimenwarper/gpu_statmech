@@ -6,6 +6,7 @@ Layer structure:
   carnot.py              — η_hw,max derivation and Carnot-optimal conditions
   energy.py              — power/energy model from simulator traces
   thermo.py              — thermodynamic analysis module (Phase 1)
+  observables.py         — simulator snapshot normalisation + observable extraction
   multi_gpu.py           — coupled-engine Carnot limit (Phase 1.5)
   parallelism.py         — parallelism optimizer (Phase 1.5)
   oracle.py              — physics-based kernel proposal oracle (Phase 2)

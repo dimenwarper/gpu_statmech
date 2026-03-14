@@ -99,3 +99,30 @@
 - The `Cv(β)` plot now uses a local quartic fit to `ln Z(β)` over a 21-point window before taking curvature, which suppresses the cold-end second-derivative noise without changing the underlying efficiency sweep.
 - This does not change the qualitative theory. It only reduces derivative noise in the displayed `S(β)` and `Cv(β)` curves.
 - With the smoother settings, the reported fixed-load single-GPU ceiling is `16.43%` at `beta = 10.0`.
+
+## 2026-03-14
+
+### Simulator-observable inference
+
+- Inspected the sibling `gpusim` repo and verified that the Python boundary already exports usable per-block microstate snapshots:
+  - per-SM active warps
+  - per-SM stall fractions
+  - per-SM instruction mix
+  - register / shared-memory utilization
+  - L2 hit rate
+  - HBM bandwidth utilization
+- Added `src/gpu_statmech/observables.py` so `gpu_statmech` can ingest raw `gpusim` snapshots directly instead of assuming the older flat mock-snapshot schema.
+- `energy.py` now normalizes raw simulator snapshots before computing the existing energy decomposition, which keeps the old interface working while making the simulator path usable.
+- `thermo.py` now has two beta-inference modes:
+  - `observable_match` (new default): infer the operating point by matching simulator-observed issue activity, stall fraction, and a memory-feed proxy against the partition-function model
+  - `crude_waste_logit` (retained): the older waste-fraction logit estimate
+- Added `mean_compute_mem_stall_fraction(...)` to `partition_function.py` so the observable-matching path can compare simulator stall observables to an internally consistent model-side stall prediction.
+- Added tests for:
+  - raw `gpusim` snapshot normalization
+  - observable aggregation
+  - observable-matching thermo inference
+  - backwards-compatible crude inference
+
+### Validation
+
+- `uv run pytest -q` -> `381 passed`

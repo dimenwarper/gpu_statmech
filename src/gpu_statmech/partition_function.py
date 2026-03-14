@@ -545,6 +545,53 @@ def mean_compute_useful_work(
     )
 
 
+def mean_compute_mem_stall_fraction(
+    beta: float,
+    sm_config: SMConfig,
+    hbm_bandwidth_bytes_per_cycle: float,
+    memory_levels: list[MemoryLevel] | None = None,
+    apply_bandwidth_correction: bool = True,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+    target_activity: float | None = None,
+) -> float:
+    """
+    Mean fraction of warp microstates in memory-stalled states.
+
+    This mirrors the same operating-point closure used by
+    ``thermodynamic_quantities()`` so simulator-observable inference can match
+    against an internally consistent stall prediction.
+    """
+    if memory_levels is None:
+        memory_levels = H100_MEMORY_LEVELS
+
+    feed_eff = memory_feed_efficiency(beta, memory_levels)
+    resolved_work_field = _resolve_operating_work_field(
+        beta,
+        sm_config,
+        hbm_bandwidth_bytes_per_cycle,
+        work_field=work_field,
+        activity_potential=activity_potential,
+        target_activity=target_activity,
+        memory_feed_factor=feed_eff,
+    )
+    effective_work_field = resolved_work_field * feed_eff
+    bandwidth_penalty = 0.0
+    if apply_bandwidth_correction:
+        bandwidth_penalty, _ = _solve_bandwidth_penalty(
+            beta,
+            sm_config,
+            hbm_bandwidth_bytes_per_cycle,
+            work_field=effective_work_field,
+        )
+    weights = _warp_microstate_weights(
+        beta,
+        work_field=effective_work_field,
+        bandwidth_penalty=bandwidth_penalty,
+    )
+    return _mean_mem_stall_from_weights(weights)
+
+
 def solve_work_field(
     beta: float,
     target_activity: float,
