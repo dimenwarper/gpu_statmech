@@ -35,18 +35,21 @@ target activity and plots `eta_hw(beta) = <W_hw>/<E_in>`, `S(beta)`,
 `Cv(beta)`, the decomposed `ln Z` components, and the solved work field `h(beta)`.
 
 **Key result:** At `target_activity = 0.20`, the current fixed-load model
-with the first-order memory-feed closure reaches **16.46%** at the upper end
+with the first-order memory-feed closure reaches **16.43%** at the upper end
 of the default sweep (`beta = 10.0`). The load closure is now well-defined,
 and the compute-memory coupling is no longer missing from the single-GPU
 path, but the present normalized energy tables still do not produce an
-interior beta optimum. The roofline ridge point (0.51 FLOP/byte) is still
-recovered exactly from the Carnot arithmetic-intensity condition — ratio = 1.0000.
+interior beta optimum. The plotted entropy and specific-heat diagnostics now
+use a higher-resolution memory grid (`n_bins = 256`) and a wider derivative
+stencil (`d_beta = 5e-3`) so the curves are numerically smoother. The roofline
+ridge point (0.51 FLOP/byte) is still recovered exactly from the Carnot
+arithmetic-intensity condition — ratio = 1.0000.
 
 | Quantity | Value |
 |---|---|
-| η_hw,max | 16.46% |
+| η_hw,max | 16.43% |
 | β_optimal | 10.0 |
-| h*(β_opt) | 3.6844 |
+| h*(β_opt) | 3.6909 |
 | target activity | 0.20 |
 | Roofline ridge | 0.51 FLOP/byte |
 | Naive Carnot η (T_reg/T_HBM) | 99.83% |

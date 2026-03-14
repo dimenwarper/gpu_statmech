@@ -47,8 +47,8 @@ print("=" * 60)
 
 target_activity = 0.20
 betas = np.linspace(0.05, 10.0, 300).tolist()
-N_BINS = 128
-D_BETA = 1e-3
+N_BINS = 256
+D_BETA = 5e-3
 print(f"  β sweep: {betas[0]:.2f} → {betas[-1]:.2f}  ({len(betas)} points)")
 print(f"  fixed target activity: {target_activity:.2f}")
 print(f"  numerical settings: n_bins={N_BINS}, d_beta={D_BETA:.0e}")

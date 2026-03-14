@@ -89,3 +89,12 @@
   - `CP` shows a modest but visible split between NVLink/NVSwitch and slower fabrics.
   - `TP` finally behaves like a real stress case: PCIe Gen5 ring and InfiniBand fat-tree become infeasible by `TP16`, while NVLink/NVSwitch stay feasible through `TP32`.
 - This is the first experiment-03 version that makes the communication-demand closure visibly useful on the plots instead of only in the equations.
+
+### Experiment 01 numerical smoothing
+
+- Increased the numerical resolution used by `experiments/theoretical_calculations/01_carnot_curve.py` for the plotted diagnostics:
+  - `n_bins = 256`
+  - `d_beta = 5e-3`
+- Also stopped clipping the plotted `Cv(β)` to non-negative values; the panel now shows the signed quantity around a zero reference line.
+- This does not change the qualitative theory. It only reduces derivative noise in the displayed `S(β)` and `Cv(β)` curves.
+- With the smoother settings, the reported fixed-load single-GPU ceiling is `16.43%` at `beta = 10.0`.
