@@ -12,4 +12,5 @@ Layer structure:
   compiler.py            — KernelProposal → KernelSpec compiler + scorer (Phase 2)
   pareto.py              — Pareto frontier utilities (Phase 3)
   loop.py                — thermodynamic architecture search loop (Phase 3)
+  utils.py               — shared analysis helpers for diagnostic curves
 """
