@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from gpu_statmech.partition_function import (
     H100_MEMORY_LEVELS,
     H100_SM_CONFIG,
-    beta_sweep,
+    thermodynamic_quantities,
 )
 from gpu_statmech.carnot import derive_carnot_limit, verify_roofline_recovery
 
@@ -47,10 +47,23 @@ print("=" * 60)
 
 target_activity = 0.20
 betas = np.linspace(0.05, 10.0, 300).tolist()
+N_BINS = 128
+D_BETA = 1e-3
 print(f"  β sweep: {betas[0]:.2f} → {betas[-1]:.2f}  ({len(betas)} points)")
 print(f"  fixed target activity: {target_activity:.2f}")
+print(f"  numerical settings: n_bins={N_BINS}, d_beta={D_BETA:.0e}")
 
-states = beta_sweep(betas, target_activity=target_activity)
+states = [
+    thermodynamic_quantities(
+        beta,
+        H100_SM_CONFIG,
+        H100_MEMORY_LEVELS,
+        n_bins=N_BINS,
+        d_beta=D_BETA,
+        target_activity=target_activity,
+    )
+    for beta in betas
+]
 etas      = [s.eta_hw          for s in states]
 entropies = [s.entropy         for s in states]
 cv        = [s.specific_heat   for s in states]
@@ -67,6 +80,7 @@ limit = derive_carnot_limit(
     beta_min=betas[0],
     beta_max=betas[-1],
     n_beta=len(betas),
+    n_bins=N_BINS,
     target_activity=target_activity,
 )
 beta_opt = limit.beta_optimal
@@ -146,7 +160,9 @@ ax2.set_xlabel("β", fontsize=11)
 ax2.set_ylabel("Cv  (per DOF)", fontsize=11)
 ax2.set_title("Specific Heat  Cv(β)", fontsize=12, fontweight="bold")
 ax2.set_xlim(betas[0], betas[-1])
-ax2.set_ylim(bottom=0)
+cv_abs_max = max(abs(v) for v in cv)
+ax2.axhline(0.0, color="black", ls=":", lw=1.0, alpha=0.7)
+ax2.set_ylim(-1.05 * cv_abs_max, 1.05 * cv_abs_max)
 ax2.grid(alpha=0.3)
 
 fig.suptitle("H100 Fixed-Load Thermodynamic Efficiency Curve  —  theoretical calculations only",
