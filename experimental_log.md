@@ -71,3 +71,21 @@
   - the communication partition now uses `exp[-beta (J_eff - g alpha) u]` per link, where `alpha` is the normalized delivered service of the link.
 - Updated `parallelism.py` so topology Carnot limits are now evaluated at workload-derived communication pressure rather than zero-demand topology-only sweeps.
 - Updated experiment 03 to use a canonical LLaMA-7B pure-DP communication load. Topology differences now move in the right direction (NVLink/NVSwitch best, InfiniBand worst), but the gap is still modest because pure DP is a relatively light communication workload and the model still lacks collective-aware routing/congestion.
+
+### Experiment 03 scenario sweep
+
+- Expanded `experiments/theoretical_calculations/03_scaling_efficiency.py` from a single pure-DP sweep into a four-scenario family:
+  - `DP-n`
+  - `PP-n`
+  - `CP-n`
+  - `TP-n`
+- The experiment now emits four figures instead of one:
+  - `03_scaling_efficiency.png`
+  - `03_comm_energy_share.png`
+  - `03_comm_load_headroom.png`
+  - `03_comm_workload_profiles.png`
+- The new outputs are materially more informative:
+  - `DP` and `PP` stay near the single-GPU ceiling on every topology.
+  - `CP` shows a modest but visible split between NVLink/NVSwitch and slower fabrics.
+  - `TP` finally behaves like a real stress case: PCIe Gen5 ring and InfiniBand fat-tree become infeasible by `TP16`, while NVLink/NVSwitch stay feasible through `TP32`.
+- This is the first experiment-03 version that makes the communication-demand closure visibly useful on the plots instead of only in the equations.

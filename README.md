@@ -127,8 +127,11 @@ Wraps the gpusim Python API and adds:
 
 Current caveat: the multi-GPU path now has a fixed communication-load
 closure, but the communication model is still coarse. It does not yet model
-collective-specific routing, congestion, or algorithmic schedule details, so
-topology effects remain modest for light-demand workloads like pure DP.
+collective-specific routing, congestion, or algorithmic schedule details. The
+updated experiment-03 scenario sweep now shows the expected split between
+light-demand workloads (DP/PP), moderate-demand workloads (CP), and a heavy
+TP stress case where slower fabrics become infeasible, but the next fidelity
+gain still needs collective-aware communication physics.
 
 **Deliverables:** `src/gpu_statmech/multi_gpu.py`, `src/gpu_statmech/parallelism.py`
 
