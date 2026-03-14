@@ -37,6 +37,39 @@ FIGURES = Path(__file__).parent / "figures"
 FIGURES.mkdir(exist_ok=True)
 
 
+def _smoothed_specific_heat_from_log_z(
+    betas: list[float],
+    log_z_values: list[float],
+    n_dof: float,
+    window: int = 21,
+    poly_order: int = 4,
+) -> list[float]:
+    """
+    Estimate Cv from a local polynomial fit to ln Z(beta).
+
+    This smooths the curvature diagnostic without changing the underlying
+    efficiency sweep or the partition function itself.
+    """
+    x = np.asarray(betas, dtype=float)
+    y = np.asarray(log_z_values, dtype=float)
+    n = len(x)
+    half_window = max(window // 2, 1)
+    values = np.zeros(n, dtype=float)
+
+    for i in range(n):
+        lo = max(0, i - half_window)
+        hi = min(n, i + half_window + 1)
+        xw = x[lo:hi] - x[i]
+        yw = y[lo:hi]
+        degree = min(poly_order, len(xw) - 1)
+        coeff = np.polyfit(xw, yw, degree)
+        poly = np.poly1d(coeff)
+        d2_ln_z = float(poly.deriv(2)(0.0)) if degree >= 2 else 0.0
+        values[i] = x[i] ** 2 * d2_ln_z / n_dof
+
+    return values.tolist()
+
+
 # ---------------------------------------------------------------------------
 # Run the β sweep
 # ---------------------------------------------------------------------------
@@ -52,6 +85,7 @@ D_BETA = 5e-3
 print(f"  β sweep: {betas[0]:.2f} → {betas[-1]:.2f}  ({len(betas)} points)")
 print(f"  fixed target activity: {target_activity:.2f}")
 print(f"  numerical settings: n_bins={N_BINS}, d_beta={D_BETA:.0e}")
+print("  Cv plot: local quartic fit to ln Z(β) over a 21-point window")
 
 states = [
     thermodynamic_quantities(
@@ -66,11 +100,13 @@ states = [
 ]
 etas      = [s.eta_hw          for s in states]
 entropies = [s.entropy         for s in states]
-cv        = [s.specific_heat   for s in states]
+log_z     = [s.log_Z           for s in states]
 lz_c      = [s.log_Z_compute   for s in states]
 lz_m      = [s.log_Z_memory    for s in states]
 lz_k      = [s.log_Z_comm      for s in states]
 fields    = [s.work_field      for s in states]
+n_dof = float(H100_SM_CONFIG.n_sm * H100_SM_CONFIG.warps_per_sm)
+cv = _smoothed_specific_heat_from_log_z(betas, log_z, n_dof)
 
 # ---------------------------------------------------------------------------
 # Carnot limit

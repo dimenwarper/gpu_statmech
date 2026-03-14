@@ -96,5 +96,6 @@
   - `n_bins = 256`
   - `d_beta = 5e-3`
 - Also stopped clipping the plotted `Cv(β)` to non-negative values; the panel now shows the signed quantity around a zero reference line.
+- The `Cv(β)` plot now uses a local quartic fit to `ln Z(β)` over a 21-point window before taking curvature, which suppresses the cold-end second-derivative noise without changing the underlying efficiency sweep.
 - This does not change the qualitative theory. It only reduces derivative noise in the displayed `S(β)` and `Cv(β)` curves.
 - With the smoother settings, the reported fixed-load single-GPU ceiling is `16.43%` at `beta = 10.0`.

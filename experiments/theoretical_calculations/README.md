@@ -41,9 +41,11 @@ and the compute-memory coupling is no longer missing from the single-GPU
 path, but the present normalized energy tables still do not produce an
 interior beta optimum. The plotted entropy and specific-heat diagnostics now
 use a higher-resolution memory grid (`n_bins = 256`) and a wider derivative
-stencil (`d_beta = 5e-3`) so the curves are numerically smoother. The roofline
-ridge point (0.51 FLOP/byte) is still recovered exactly from the Carnot
-arithmetic-intensity condition — ratio = 1.0000.
+stencil (`d_beta = 5e-3`) so the curves are numerically smoother. The `Cv(β)`
+panel is further stabilized by estimating the curvature from a local quartic
+fit to `ln Z(β)` rather than from the raw pointwise second-difference stencil.
+The roofline ridge point (0.51 FLOP/byte) is still recovered exactly from the
+Carnot arithmetic-intensity condition — ratio = 1.0000.
 
 | Quantity | Value |
 |---|---|
