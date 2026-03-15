@@ -46,12 +46,14 @@ from gpu_statmech.gpusim_recommendation import (  # noqa: E402
     INTERVENTION_KEYS,
     RecommendationBaseline,
     apply_intervention,
+    fit_statmech_response_model,
     generate_recommendation_baselines,
     oracle_attainment_ratio,
     recommend_intervention_occupancy_only,
     recommend_intervention_raw_counter,
     recommend_intervention_roofline,
     recommend_intervention_statmech,
+    recommend_intervention_statmech_response,
     statmech_intervention_scores,
 )
 from gpu_statmech.partition_function import H100_MEMORY_LEVELS, H100_SM_CONFIG  # noqa: E402
@@ -62,6 +64,7 @@ FIGURES = Path(__file__).parent / "figures"
 FIGURES.mkdir(exist_ok=True)
 
 METHOD_ORDER = (
+    "stat_mech_response",
     "stat_mech",
     "raw_counter",
     "roofline",
@@ -69,6 +72,7 @@ METHOD_ORDER = (
     "random",
 )
 METHOD_LABELS = {
+    "stat_mech_response": "stat-mech response",
     "stat_mech": "stat-mech",
     "raw_counter": "raw counters",
     "roofline": "roofline",
@@ -76,6 +80,7 @@ METHOD_LABELS = {
     "random": "random",
 }
 METHOD_COLORS = {
+    "stat_mech_response": "#2f5aa8",
     "stat_mech": "#4c72b0",
     "raw_counter": "#dd8452",
     "roofline": "#55a868",
@@ -168,7 +173,6 @@ def _all_profiles_for_experiment(
 
 def _method_recommendations(analysis: object, *, rng: np.random.Generator) -> dict[str, str]:
     return {
-        "stat_mech": recommend_intervention_statmech(analysis),
         "raw_counter": recommend_intervention_raw_counter(analysis),
         "roofline": recommend_intervention_roofline(analysis),
         "occupancy_only": recommend_intervention_occupancy_only(analysis),
@@ -228,13 +232,13 @@ def _plot_oracle_attainment(records: list[dict[str, object]], *, seed: int) -> P
 
 def _plot_statmech_supporting(records: list[dict[str, object]]) -> Path:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.2))
-    fig.suptitle("Stat-mech Recommendation Diagnostics", fontsize=13, fontweight="bold")
+    fig.suptitle("Stat-mech Response-Model Diagnostics", fontsize=13, fontweight="bold")
 
     lever_to_idx = {lever: idx for idx, lever in enumerate(INTERVENTION_KEYS)}
     confusion = np.zeros((len(INTERVENTION_KEYS), len(INTERVENTION_KEYS)), dtype=float)
     for record in records:
         oracle_idx = lever_to_idx[str(record["oracle_lever"])]
-        pred_idx = lever_to_idx[str(record["recommended"]["stat_mech"])]
+        pred_idx = lever_to_idx[str(record["recommended"]["stat_mech_response"])]
         confusion[oracle_idx, pred_idx] += 1.0
 
     row_totals = confusion.sum(axis=1, keepdims=True)
@@ -246,7 +250,7 @@ def _plot_statmech_supporting(records: list[dict[str, object]]) -> Path:
     ax.set_xticklabels([LEVER_LABELS[k] for k in INTERVENTION_KEYS], rotation=25, ha="right")
     ax.set_yticks(np.arange(len(INTERVENTION_KEYS)))
     ax.set_yticklabels([LEVER_LABELS[k] for k in INTERVENTION_KEYS])
-    ax.set_xlabel("Recommended by stat-mech")
+    ax.set_xlabel("Recommended by stat-mech response")
     ax.set_ylabel("Oracle-best lever")
     ax.set_title("Normalized confusion matrix")
     for row in range(normalized.shape[0]):
@@ -259,18 +263,22 @@ def _plot_statmech_supporting(records: list[dict[str, object]]) -> Path:
     stress_groups = []
     stress_means = []
     for stress in BASELINE_STRESS_KEYS:
-        vals = [float(record["attainment"]["stat_mech"]) for record in records if record["stress"] == stress]
+        vals = [
+            float(record["attainment"]["stat_mech_response"])
+            for record in records
+            if record["stress"] == stress
+        ]
         if not vals:
             continue
         stress_groups.append(STRESS_LABELS[stress])
         stress_means.append(float(np.mean(vals)))
     xpos = np.arange(len(stress_groups))
-    ax.bar(xpos, stress_means, color=METHOD_COLORS["stat_mech"], edgecolor="white")
+    ax.bar(xpos, stress_means, color=METHOD_COLORS["stat_mech_response"], edgecolor="white")
     ax.set_xticks(xpos)
     ax.set_xticklabels(stress_groups, rotation=20, ha="right")
     ax.set_ylim(0.0, 1.05)
     ax.set_ylabel("Mean oracle attainment ratio")
-    ax.set_title("Stat-mech attainment by baseline stress")
+    ax.set_title("Response-model attainment by baseline stress")
     ax.grid(True, axis="y", alpha=0.25)
     for idx, mean in enumerate(stress_means):
         ax.text(idx, mean + 0.03, f"{mean:.2f}", ha="center", va="bottom", fontsize=8)
@@ -322,26 +330,19 @@ def main() -> int:
             skipped += 1
             continue
 
-        recommended = _method_recommendations(baseline_analysis, rng=rng)
-        stat_scores = statmech_intervention_scores(baseline_analysis)
-        attainment = {
-            method: oracle_attainment_ratio(float(gains[lever]), oracle_gain)
-            for method, lever in recommended.items()
-        }
         records.append(
             {
                 "family": baseline.family,
                 "stress": baseline.stress,
                 "baseline_name": baseline.profile.name,
+                "analysis": baseline_analysis,
                 "baseline_eta": baseline_analysis.eta_hw,
                 "oracle_lever": oracle_lever,
                 "oracle_gain": oracle_gain,
                 "gains": gains,
-                "recommended": recommended,
-                "attainment": attainment,
                 "dominant_phase": baseline_analysis.dominant_phase,
                 "dominant_bottleneck": baseline_analysis.bottleneck.dominant_source,
-                "stat_scores": stat_scores,
+                "stat_scores": statmech_intervention_scores(baseline_analysis),
             }
         )
 
@@ -349,12 +350,33 @@ def main() -> int:
         print("No actionable baselines found; all interventions had zero or negative gain.", file=sys.stderr)
         return 2
 
+    # Fit the response model on all families except the held-out family.
+    for family in sorted({str(record["family"]) for record in records}):
+        train = [record for record in records if record["family"] != family]
+        holdout = [record for record in records if record["family"] == family]
+        params = fit_statmech_response_model(
+            [record["analysis"] for record in train],
+            [record["gains"] for record in train],
+        )
+        for record in holdout:
+            record["response_params"] = params
+            record["recommended"] = {
+                "stat_mech_response": recommend_intervention_statmech_response(record["analysis"], params),
+                "stat_mech": recommend_intervention_statmech(record["analysis"]),
+                **_method_recommendations(record["analysis"], rng=rng),
+            }
+            record["attainment"] = {
+                method: oracle_attainment_ratio(float(record["gains"][lever]), float(record["oracle_gain"]))
+                for method, lever in record["recommended"].items()
+            }
+
     print("=" * 72)
     print("Experiment 02 — Simulator Intervention Recommendation")
     print("=" * 72)
     print(f"GPU preset          : {args.gpu}")
     print(f"Kernel families     : {', '.join(profile.name for profile in families)}")
     print(f"Actionable baselines: {len(records)} / {len(baselines)} (skipped {skipped})")
+    print("Stat-mech response  : leave-one-family-out fit")
 
     oracle_by_stress: dict[str, list[str]] = defaultdict(list)
     for record in records:

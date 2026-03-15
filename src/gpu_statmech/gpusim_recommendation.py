@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Mapping
 
+import numpy as np
+
 from .gpusim_driver import GpuSimKernelProfile
 
 
@@ -38,6 +40,23 @@ class RecommendationBaseline:
     @property
     def key(self) -> str:
         return f"{self.family}:{self.stress}"
+
+
+@dataclass(frozen=True)
+class StatMechResponseParams:
+    """Interpretable lever-response coefficients for first-order gain prediction."""
+
+    locality_feed: float = 1.0
+    locality_memory_pressure: float = 1.0
+    locality_movement: float = 1.0
+
+    occupancy_dependency: float = 1.0
+    occupancy_resource: float = 1.0
+    occupancy_issue_gap: float = 1.0
+
+    tensorize_scalar_math: float = 1.0
+    tensorize_tensor_gap: float = 1.0
+    tensorize_productive_surplus: float = 1.0
 
 
 def _renormalize_instr_mix(instr_mix: Mapping[str, float]) -> dict[str, float]:
@@ -212,6 +231,123 @@ def oracle_attainment_ratio(chosen_gain: float, oracle_gain: float) -> float:
     if oracle_gain <= 1e-12:
         return 1.0
     return max(0.0, min(chosen_gain / oracle_gain, 1.0))
+
+
+def _response_features(analysis: object) -> dict[str, np.ndarray]:
+    observables = analysis.observables
+    families = observables.mean_warp_state_family_fractions
+    instr_mix = observables.mean_instr_mix
+    bottleneck = analysis.bottleneck
+
+    locality = np.asarray(
+        [
+            max(0.0, 1.0 - analysis.thermo_state.memory_feed_efficiency),
+            0.5 * float(families.get("memory", 0.0))
+            + 0.5 * float(observables.mean_memory_stall_fraction),
+            0.5 * float(instr_mix.get("mem", 0.0))
+            + 0.5 * float(bottleneck.dram_movement_fraction),
+        ],
+        dtype=float,
+    )
+    occupancy = np.asarray(
+        [
+            float(families.get("dependency", 0.0))
+            + 0.5 * float(families.get("sync_frontend", 0.0)),
+            0.5 * float(observables.mean_reg_utilization)
+            + 0.5 * float(observables.mean_smem_utilization),
+            max(0.0, 1.0 - float(observables.mean_issue_activity)),
+        ],
+        dtype=float,
+    )
+    tensorize = np.asarray(
+        [
+            float(instr_mix.get("fp32", 0.0)) + 0.5 * float(instr_mix.get("fp16", 0.0)),
+            max(0.0, 1.0 - float(instr_mix.get("tensor_core", 0.0))),
+            max(0.0, float(families.get("productive", 0.0)) - float(families.get("memory", 0.0)))
+            * float(observables.mean_issue_activity),
+        ],
+        dtype=float,
+    )
+    return {
+        "locality": locality,
+        "occupancy": occupancy,
+        "tensorize": tensorize,
+    }
+
+
+def fit_statmech_response_model(
+    analyses: list[object],
+    realized_gains: list[dict[str, float]],
+    *,
+    ridge: float = 1e-3,
+) -> StatMechResponseParams:
+    """
+    Fit first-order intervention effect sizes from simulator counterfactuals.
+
+    Each lever is fit independently against the clipped positive gain so the
+    learned coefficients remain interpretable as "how much upside this signal
+    typically converts into efficiency improvement".
+    """
+
+    if len(analyses) != len(realized_gains):
+        raise ValueError("analyses and realized_gains must have the same length")
+    if not analyses:
+        return StatMechResponseParams()
+
+    fitted: dict[str, np.ndarray] = {}
+    for lever in INTERVENTION_KEYS:
+        X = np.vstack([_response_features(analysis)[lever] for analysis in analyses])
+        y = np.asarray([max(0.0, float(gains.get(lever, 0.0))) for gains in realized_gains], dtype=float)
+        xtx = X.T @ X + ridge * np.eye(X.shape[1], dtype=float)
+        xty = X.T @ y
+        coeff = np.linalg.solve(xtx, xty)
+        fitted[lever] = np.clip(coeff, 0.0, None)
+
+    return StatMechResponseParams(
+        locality_feed=float(fitted["locality"][0]),
+        locality_memory_pressure=float(fitted["locality"][1]),
+        locality_movement=float(fitted["locality"][2]),
+        occupancy_dependency=float(fitted["occupancy"][0]),
+        occupancy_resource=float(fitted["occupancy"][1]),
+        occupancy_issue_gap=float(fitted["occupancy"][2]),
+        tensorize_scalar_math=float(fitted["tensorize"][0]),
+        tensorize_tensor_gap=float(fitted["tensorize"][1]),
+        tensorize_productive_surplus=float(fitted["tensorize"][2]),
+    )
+
+
+def predict_intervention_gains_statmech(
+    analysis: object,
+    params: StatMechResponseParams,
+) -> dict[str, float]:
+    """Predict per-lever efficiency gain from the inferred baseline state."""
+
+    features = _response_features(analysis)
+    return {
+        "locality": float(
+            params.locality_feed * features["locality"][0]
+            + params.locality_memory_pressure * features["locality"][1]
+            + params.locality_movement * features["locality"][2]
+        ),
+        "occupancy": float(
+            params.occupancy_dependency * features["occupancy"][0]
+            + params.occupancy_resource * features["occupancy"][1]
+            + params.occupancy_issue_gap * features["occupancy"][2]
+        ),
+        "tensorize": float(
+            params.tensorize_scalar_math * features["tensorize"][0]
+            + params.tensorize_tensor_gap * features["tensorize"][1]
+            + params.tensorize_productive_surplus * features["tensorize"][2]
+        ),
+    }
+
+
+def recommend_intervention_statmech_response(
+    analysis: object,
+    params: StatMechResponseParams,
+) -> str:
+    gains = predict_intervention_gains_statmech(analysis, params)
+    return max(INTERVENTION_KEYS, key=lambda lever: (gains[lever], -INTERVENTION_KEYS.index(lever)))
 
 
 def statmech_intervention_scores(analysis: object) -> dict[str, float]:

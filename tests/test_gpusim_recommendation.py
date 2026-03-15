@@ -5,11 +5,14 @@ import pytest
 from gpu_statmech.gpusim_driver import GpuSimKernelProfile
 from gpu_statmech.gpusim_recommendation import (
     apply_intervention,
+    fit_statmech_response_model,
     generate_recommendation_baselines,
     oracle_attainment_ratio,
+    predict_intervention_gains_statmech,
     recommend_intervention_raw_counter,
     recommend_intervention_roofline,
     recommend_intervention_statmech,
+    recommend_intervention_statmech_response,
 )
 
 
@@ -167,6 +170,23 @@ def test_raw_counter_and_roofline_heuristics_map_to_expected_levers():
     )
     assert recommend_intervention_raw_counter(analysis) == "tensorize"
     assert recommend_intervention_roofline(analysis) == "tensorize"
+
+
+def test_response_model_predicts_larger_gain_for_memory_pressure():
+    analysis = _analysis(
+        families={"productive": 0.2, "dependency": 0.1, "memory": 0.55, "sync_frontend": 0.05, "idle": 0.1},
+        mean_memory_stall_fraction=0.45,
+        dram_movement_fraction=0.35,
+        memory_feed_efficiency=0.25,
+    )
+    params = fit_statmech_response_model(
+        [analysis],
+        [{"locality": 0.12, "occupancy": 0.01, "tensorize": 0.02}],
+    )
+    gains = predict_intervention_gains_statmech(analysis, params)
+    assert gains["locality"] > gains["occupancy"]
+    assert gains["locality"] > gains["tensorize"]
+    assert recommend_intervention_statmech_response(analysis, params) == "locality"
 
 
 @pytest.mark.parametrize(

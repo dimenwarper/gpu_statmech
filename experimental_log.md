@@ -192,12 +192,16 @@
 - On the current H100 simulator sweep:
   - actionable baselines: `18 / 20`
   - mean oracle attainment:
+    - `stat-mech response`: `0.865`
     - `stat-mech`: `0.865`
     - `raw counters`: `0.870`
     - `roofline`: `0.759`
     - `occupancy only`: `0.001`
-    - `random`: `0.728`
+    - `random`: `0.717`
 - Interpretation:
+  - the first leave-one-family-out response model is now implemented; it predicts
+    per-lever gains from interpretable headroom features rather than using only a
+    hand-scored bottleneck table
   - the thermodynamic recommender is already substantially better than the
     weak baselines (`roofline`, `occupancy only`, `random`)
   - the strongest simple baseline is still the raw counter-family heuristic,
@@ -205,5 +209,5 @@
     suite
   - that is a useful gap, not a contradiction: the simulator interventions are
     still tightly aligned to the same coarse families used in the raw-counter
-    policy, so the next improvement is to make the thermodynamic mapping more
+    policy, so the next improvement is to make the response features more
     discriminative than simple family-majority rules

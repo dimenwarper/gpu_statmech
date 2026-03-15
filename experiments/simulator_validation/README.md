@@ -37,6 +37,7 @@ families, then asks a decision question:
 
 The script compares:
 
+- stat-mech response model (leave-one-family-out fit)
 - stat-mech recommendation
 - raw counter-family heuristic
 - roofline-style heuristic
