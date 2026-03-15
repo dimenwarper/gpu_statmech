@@ -17,6 +17,15 @@ input cost dominate the ensemble. That gives us a first-principles efficiency
 objective for designing kernels and models that are physically aligned with
 the GPU.
 
+Raw GPU profiling tells us what happened during execution, but it does not by
+itself tell us how close a kernel is to the best physically achievable regime
+or which changes would move it there. This project uses a
+statistical-mechanics model to turn traces into a compact operating-state
+estimate, an efficiency ceiling, and a bottleneck decomposition grounded in
+the GPU's compute, memory, and communication constraints. Profiling is the
+observation layer; the thermodynamic model is the inference layer that turns
+counters into efficiency, gap-to-limit, and optimization guidance.
+
 Overall efficiency decomposes into two layers:
 
 ```
