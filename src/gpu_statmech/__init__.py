@@ -9,6 +9,7 @@ Layer structure:
   observables.py         — simulator snapshot normalisation + observable extraction
   multi_gpu.py           — coupled-engine Carnot limit (Phase 1.5)
   parallelism.py         — parallelism optimizer (Phase 1.5)
+  gpusim_driver.py       — canonical gpusim workload driver + reporting
   oracle.py              — physics-based kernel proposal oracle (Phase 2)
   compiler.py            — KernelProposal → KernelSpec compiler + scorer (Phase 2)
   pareto.py              — Pareto frontier utilities (Phase 3)

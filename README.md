@@ -65,7 +65,19 @@ Current status:
 - The simulator-facing path now accepts raw `gpusim` snapshots directly and
   includes an observable-matching operating-point inference path in addition
   to the older crude waste-logit estimate.
+- A canonical end-to-end simulation driver now lives at
+  `scripts/run_gpusim_analysis.py` for running representative kernels through
+  `gpusim` and reporting their inferred operating state here.
 - Recent theory changes and experiment notes are tracked in [`experimental_log.md`](experimental_log.md).
+
+Quick start for the simulator-driven path:
+
+```bash
+cd ../gpusim
+maturin develop --features python
+cd ../gpu_statmech
+uv run python scripts/run_gpusim_analysis.py --gpu h100
+```
 
 ---
 

@@ -126,3 +126,23 @@
 ### Validation
 
 - `uv run pytest -q` -> `381 passed`
+
+### Canonical gpusim driver
+
+- Added `src/gpu_statmech/gpusim_driver.py` plus `scripts/run_gpusim_analysis.py`.
+- The new driver runs a canonical suite of simulator workloads:
+  - `gemm_tc`
+  - `flash_attention`
+  - `layernorm`
+  - `softmax_reduce`
+  - `transpose_bw`
+- The report path is intentionally simple:
+  - run the kernel suite in `gpusim`
+  - ingest the raw block traces here
+  - analyse the resulting protocol with the existing thermodynamic stack
+  - print a compact operating-point summary per kernel and for the full protocol
+- This is the first reusable end-to-end demo path for simulator-driven inference in the repo.
+
+### Validation
+
+- `uv run pytest -q` -> `382 passed`
