@@ -26,6 +26,22 @@ the GPU's compute, memory, and communication constraints. Profiling is the
 observation layer; the thermodynamic model is the inference layer that turns
 counters into efficiency, gap-to-limit, and optimization guidance.
 
+In this repo, efficiency is not utilization. The core quantity is hardware
+efficiency
+
+```
+eta_hw = <W_hw> / <E_in>
+```
+
+which means useful hardware work delivered per unit input cost under the
+observed execution-state distribution. ML on raw traces is a valid baseline
+for estimating runtime, throughput, power, or even efficiency proxies from
+counters, and we should compare against it explicitly. The claim here is not
+"physics instead of ML"; it is that the thermodynamic model defines the object
+being estimated — a latent operating state, an efficiency ceiling `eta_hw,max`,
+and a bottleneck decomposition — while ML is a baseline estimator or a hybrid
+layer on top of that definition.
+
 Overall efficiency decomposes into two layers:
 
 ```
