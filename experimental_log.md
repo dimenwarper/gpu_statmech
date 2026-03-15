@@ -146,3 +146,19 @@
 ### Validation
 
 - `uv run pytest -q` -> `382 passed`
+
+## 2026-03-15
+
+### Simulator-backed plotting experiment
+
+- Added `experiments/simulator_validation/01_canonical_kernel_profiles.py`.
+- The new experiment reuses the same canonical kernel profiles and `gpusim` driver path as `scripts/run_gpusim_analysis.py`, but saves figures instead of only printing a text summary.
+- Current outputs:
+  - `experiments/simulator_validation/figures/01_canonical_overview.png`
+  - `experiments/simulator_validation/figures/01_warp_state_match.png`
+- The overview figure shows:
+  - measured `eta_hw` vs inferred `eta_hw,max`
+  - observed issue / stall / memory-stall fractions
+  - issue-vs-memory-stall operating regimes
+  - inferred `beta` and memory-feed efficiency
+- The warp-state figure compares observed `gpusim` warp-state occupancy against the model-predicted occupancy at the inferred operating point.
