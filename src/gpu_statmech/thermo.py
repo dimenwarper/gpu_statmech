@@ -58,16 +58,53 @@ def classify_phase(
     """
     Classify the execution phase of a single snapshot.
 
-    Rules (mirroring the roofline model):
-      - Compute-bound:  stall_fraction < 0.2  AND  hbm_bw_util < 0.7
-      - Memory-bound:   hbm_bw_util > 0.7
-      - Latency-bound:  stall_fraction > 0.4  AND  active_warps < min_occupancy
-      - Mixed:          everything else
+    Prefer warp-state observables when available:
+      - Memory-bound: dominant long-scoreboard / mem-throttle pressure
+      - Latency-bound: dominant dependency / barrier / fetch pressure
+      - Compute-bound: high eligible fraction with low stall pressure
+      - Mixed: no single mechanism dominates
+
+    Fall back to the older occupancy heuristic for legacy flat snapshots that
+    do not expose warp-state fractions.
     """
     snap = canonicalize_snapshot(snapshot)
+    state_frac = snap.get("warp_state_frac", {})
+    if isinstance(state_frac, dict) and state_frac:
+        eligible = float(state_frac.get("eligible", 0.0))
+        idle = float(state_frac.get("idle", 0.0))
+        short_scoreboard = float(state_frac.get("short_scoreboard", 0.0))
+        memory_pressure = (
+            float(state_frac.get("long_scoreboard", 0.0))
+            + float(state_frac.get("mem_throttle", 0.0))
+            + 0.5 * short_scoreboard
+        )
+        latency_pressure = (
+            float(state_frac.get("exec_dep", 0.0))
+            + float(state_frac.get("barrier", 0.0))
+            + float(state_frac.get("fetch", 0.0))
+            + 0.5 * short_scoreboard
+        )
+        issue = float(snap.get("issue_activity", 0.0))
+        memory_stall = float(snap.get("memory_stall_fraction", 0.0))
+        bw = float(snap.get("hbm_bw_util", 0.0))
+
+        if memory_pressure >= 0.45 or memory_stall >= 0.35 or bw >= 0.7:
+            return ExecutionPhase.MEMORY_BOUND
+        if latency_pressure >= 0.20 and latency_pressure > memory_pressure + 0.05 and issue < 0.45:
+            return ExecutionPhase.LATENCY_BOUND
+        if (
+            eligible >= 0.45
+            and issue >= 0.35
+            and memory_pressure < 0.25
+            and latency_pressure < 0.15
+            and idle < 0.25
+        ):
+            return ExecutionPhase.COMPUTE_BOUND
+        return ExecutionPhase.MIXED
+
     stall = float(snap.get("stall_fraction", 0.0))
-    bw    = float(snap.get("hbm_bw_util", 0.0))
-    occ   = float(snap.get("active_warps", 1.0))
+    bw = float(snap.get("hbm_bw_util", 0.0))
+    occ = float(snap.get("active_warps", 1.0))
     min_occ = carnot_limit.min_warp_occupancy
 
     if bw > 0.7:

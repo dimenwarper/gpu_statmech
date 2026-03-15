@@ -89,6 +89,76 @@ def _gpusim_snap(**overrides) -> dict:
     return base
 
 
+def _stateful_snap(kind: str) -> dict:
+    presets = {
+        "compute": _gpusim_snap(
+            total_virtual_cycles=24,
+            warp_state_cycles={
+                "eligible": 768,
+                "long_scoreboard": 24,
+                "short_scoreboard": 24,
+                "barrier": 0,
+                "exec_dep": 48,
+                "mem_throttle": 0,
+                "fetch": 0,
+                "idle": 96,
+            },
+            sm_active_warps=[40, 0, 0, 0],
+            hbm_bw_utilization=0.2,
+            l2_hit_rate=0.9,
+        ),
+        "memory": _gpusim_snap(
+            total_virtual_cycles=24,
+            warp_state_cycles={
+                "eligible": 96,
+                "long_scoreboard": 432,
+                "short_scoreboard": 48,
+                "barrier": 0,
+                "exec_dep": 24,
+                "mem_throttle": 96,
+                "fetch": 0,
+                "idle": 72,
+            },
+            sm_active_warps=[32, 0, 0, 0],
+            hbm_bw_utilization=0.85,
+            l2_hit_rate=0.3,
+        ),
+        "latency": _gpusim_snap(
+            total_virtual_cycles=24,
+            warp_state_cycles={
+                "eligible": 144,
+                "long_scoreboard": 72,
+                "short_scoreboard": 24,
+                "barrier": 0,
+                "exec_dep": 192,
+                "mem_throttle": 0,
+                "fetch": 24,
+                "idle": 120,
+            },
+            sm_active_warps=[24, 0, 0, 0],
+            hbm_bw_utilization=0.25,
+            l2_hit_rate=0.7,
+        ),
+        "mixed": _gpusim_snap(
+            total_virtual_cycles=24,
+            warp_state_cycles={
+                "eligible": 240,
+                "long_scoreboard": 144,
+                "short_scoreboard": 72,
+                "barrier": 24,
+                "exec_dep": 96,
+                "mem_throttle": 48,
+                "fetch": 0,
+                "idle": 144,
+            },
+            sm_active_warps=[32, 0, 0, 0],
+            hbm_bw_utilization=0.45,
+            l2_hit_rate=0.6,
+        ),
+    }
+    return presets[kind]
+
+
 @pytest.fixture(scope="module")
 def limit():
     return derive_carnot_limit()
@@ -99,17 +169,29 @@ def limit():
 # ---------------------------------------------------------------------------
 
 class TestClassifyPhase:
-    def test_memory_bound(self, limit):
+    def test_memory_bound_fallback(self, limit):
         snap = _snap(hbm_bw_util=0.9)
         assert classify_phase(snap, limit) == ExecutionPhase.MEMORY_BOUND
 
-    def test_latency_bound(self, limit):
+    def test_latency_bound_fallback(self, limit):
         snap = _snap(stall_fraction=0.8, active_warps=0.01)
         assert classify_phase(snap, limit) == ExecutionPhase.LATENCY_BOUND
 
-    def test_compute_bound(self, limit):
+    def test_compute_bound_fallback(self, limit):
         snap = _snap(stall_fraction=0.05, hbm_bw_util=0.1)
         assert classify_phase(snap, limit) == ExecutionPhase.COMPUTE_BOUND
+
+    def test_compute_bound_from_warp_states(self, limit):
+        assert classify_phase(_stateful_snap("compute"), limit) == ExecutionPhase.COMPUTE_BOUND
+
+    def test_memory_bound_from_warp_states(self, limit):
+        assert classify_phase(_stateful_snap("memory"), limit) == ExecutionPhase.MEMORY_BOUND
+
+    def test_latency_bound_from_warp_states(self, limit):
+        assert classify_phase(_stateful_snap("latency"), limit) == ExecutionPhase.LATENCY_BOUND
+
+    def test_mixed_from_warp_states(self, limit):
+        assert classify_phase(_stateful_snap("mixed"), limit) == ExecutionPhase.MIXED
 
     def test_returns_known_phase(self, limit):
         snap = _snap()
