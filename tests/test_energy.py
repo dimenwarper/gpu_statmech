@@ -37,6 +37,38 @@ def _snapshot(**overrides) -> dict:
     return base
 
 
+def _gpusim_snapshot(**overrides) -> dict:
+    base = {
+        "cycle": 1,
+        "gpu_id": 0,
+        "active_sm_id": 0,
+        "total_virtual_cycles": 24,
+        "warp_state_cycles": {
+            "eligible": 192,
+            "long_scoreboard": 144,
+            "short_scoreboard": 48,
+            "barrier": 0,
+            "exec_dep": 48,
+            "mem_throttle": 48,
+            "fetch": 0,
+            "idle": 96,
+        },
+        "sm_active_warps": [24, 0, 0, 0],
+        "sm_max_warps": 64,
+        "sm_instr_mix": [
+            {"fp16": 0.1, "fp32": 0.2, "int": 0.0, "sfu": 0.0, "mem": 0.2, "tensor_core": 0.5}
+        ],
+        "sm_stall_frac": [0.5, 0.0, 0.0, 0.0],
+        "reg_utilization": 0.5,
+        "smem_utilization": 0.6,
+        "l2_hit_rate": 0.75,
+        "hbm_bw_utilization": 0.2,
+        "bw_nvlink": 0.0,
+    }
+    base.update(overrides)
+    return base
+
+
 class TestComputeEnergy:
     def test_total_energy_positive(self):
         e = compute_energy(_snapshot())
@@ -87,6 +119,12 @@ class TestComputeEnergy:
         snap = _snapshot(instr_mix={})
         e = compute_energy(snap)
         assert e.E_total_nj > 0.0
+
+    def test_raw_gpusim_snapshot_produces_nonzero_eta(self):
+        e = compute_energy(_gpusim_snapshot())
+        assert e.E_total_nj > 0.0
+        assert e.W_hw_nj > 0.0
+        assert 0.0 < e.eta_hw < 1.0
 
 
 class TestAggregateEnergy:

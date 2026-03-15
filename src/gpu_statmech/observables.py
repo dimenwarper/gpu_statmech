@@ -59,6 +59,53 @@ def _normalize_warp_state_fractions(snapshot: dict[str, Any]) -> dict[str, float
     return {}
 
 
+def _local_active_warps(snapshot: dict[str, Any], state_frac: dict[str, float]) -> float:
+    cycle = float(snapshot.get("total_virtual_cycles", 0.0))
+    sm_max_warps = max(float(snapshot.get("sm_max_warps", 1.0)), 1.0)
+
+    cycles = snapshot.get("warp_state_cycles")
+    if isinstance(cycles, dict) and cycles and cycle > 0.0:
+        total_warp_cycles = sum(max(float(cycles.get(key, 0.0)), 0.0) for key in WARP_STATE_KEYS)
+        if total_warp_cycles > 0.0:
+            resident_warps = total_warp_cycles / cycle
+            return float(np.clip(resident_warps / sm_max_warps, 0.0, 1.0))
+
+    sm_active = snapshot.get("sm_active_warps")
+    if isinstance(sm_active, list) and sm_active:
+        active_sm_id = int(snapshot.get("active_sm_id", 0))
+        if 0 <= active_sm_id < len(sm_active):
+            return float(np.clip(float(sm_active[active_sm_id]) / sm_max_warps, 0.0, 1.0))
+
+        nonzero = [float(v) for v in sm_active if float(v) > 0.0]
+        if nonzero:
+            return float(np.clip(float(np.mean(nonzero)) / sm_max_warps, 0.0, 1.0))
+
+    if state_frac and cycle > 0.0:
+        non_idle = 1.0 - float(state_frac.get("idle", 0.0))
+        return float(np.clip(non_idle, 0.0, 1.0))
+
+    return 0.0
+
+
+def _active_sm_count(snapshot: dict[str, Any]) -> int:
+    sm_active = snapshot.get("sm_active_warps")
+    if isinstance(sm_active, list) and sm_active:
+        count = sum(1 for value in sm_active if float(value) > 0.0)
+        return max(count, 1)
+    return 1
+
+
+def _total_warp_cycles(snapshot: dict[str, Any], cycle: float, active_warp_fraction: float) -> float:
+    cycles = snapshot.get("warp_state_cycles")
+    if isinstance(cycles, dict) and cycles:
+        total = sum(max(float(cycles.get(key, 0.0)), 0.0) for key in WARP_STATE_KEYS)
+        if total > 0.0:
+            return float(total)
+
+    sm_max_warps = max(float(snapshot.get("sm_max_warps", 64.0)), 1.0)
+    return float(max(cycle, 1.0) * active_warp_fraction * sm_max_warps)
+
+
 def _stall_fraction_from_state_fractions(state_frac: dict[str, float]) -> float | None:
     if not state_frac:
         return None
@@ -144,8 +191,7 @@ def canonicalize_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             "threads_per_block": int(snapshot.get("threads_per_block", 128)),
         }
 
-    sm_max_warps = max(float(snapshot.get("sm_max_warps", 1.0)), 1.0)
-    mean_active_warps = _mean_or(0.0, snapshot.get("sm_active_warps", [])) / sm_max_warps
+    local_active_warps = _local_active_warps(snapshot, state_frac)
     mean_stall_frac = (
         state_stall
         if state_stall is not None
@@ -156,25 +202,30 @@ def canonicalize_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         # Old gpusim traces used `cycle` as a block index, not a duration.
         cycle = 1.0
 
+    total_warp_cycles = _total_warp_cycles(snapshot, cycle, local_active_warps)
+    threads_per_block = int(max(round(total_warp_cycles / max(cycle, 1.0)) * 32, 32))
+
     return {
         "cycle": cycle,
-        "active_warps": float(np.clip(mean_active_warps, 0.0, 1.0)),
+        "active_warps": float(np.clip(local_active_warps, 0.0, 1.0)),
         "stall_fraction": float(np.clip(mean_stall_frac, 0.0, 1.0)),
         "issue_activity": float(
             issue_activity
             if issue_activity is not None
-            else np.clip(mean_active_warps * (1.0 - mean_stall_frac), 0.0, 1.0)
+            else np.clip(local_active_warps * (1.0 - mean_stall_frac), 0.0, 1.0)
         ),
         "memory_stall_fraction": memory_stall,
         "warp_state_frac": state_frac,
+        "total_warp_cycles": total_warp_cycles,
         "instr_mix": _average_instr_mix(snapshot.get("sm_instr_mix", [])),
         "l2_hit_rate": float(snapshot.get("l2_hit_rate", 0.0)),
         "hbm_bw_util": float(snapshot.get("hbm_bw_utilization", 0.0)),
         "smem_util": float(snapshot.get("smem_utilization", 0.0)),
         "reg_util": float(snapshot.get("reg_utilization", 0.0)),
         "bw_nvlink": float(snapshot.get("bw_nvlink", 0.0)),
+        "active_sm_count": _active_sm_count(snapshot),
         "blocks_executed": 1,
-        "threads_per_block": int(snapshot.get("threads_per_block", 128)),
+        "threads_per_block": int(snapshot.get("threads_per_block", threads_per_block)),
     }
 
 

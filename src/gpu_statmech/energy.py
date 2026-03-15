@@ -16,10 +16,17 @@ to accept the dict/dataclass output of the gpusim Python bindings directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from .observables import canonicalize_snapshot
+from .partition_function import (
+    INSTRUCTION_CLASS_INPUT_ENERGY,
+    INSTRUCTION_CLASS_USEFUL_WORK,
+    WARP_STATE_BASE_INPUT_ENERGY,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +57,56 @@ class EnergyParams:
 
 
 H100_ENERGY_PARAMS = EnergyParams()
+
+_STALL_STATE_KEYS = (
+    "long_scoreboard",
+    "short_scoreboard",
+    "barrier",
+    "exec_dep",
+    "mem_throttle",
+    "fetch",
+)
+
+
+def _normalized_instr_mix(instr_mix: dict[str, Any]) -> dict[str, float]:
+    keys = tuple(INSTRUCTION_CLASS_INPUT_ENERGY)
+    if not instr_mix:
+        return {"fp32": 1.0, **{key: 0.0 for key in keys if key != "fp32"}}
+
+    norm = {key: max(float(instr_mix.get(key, 0.0)), 0.0) for key in keys}
+    total = sum(norm.values())
+    if total <= 0.0:
+        return {"fp32": 1.0, **{key: 0.0 for key in keys if key != "fp32"}}
+    return {key: value / total for key, value in norm.items()}
+
+
+def _state_fractions(snapshot: dict[str, Any], active_warps: float, stall_frac: float) -> dict[str, float]:
+    state_frac = snapshot.get("warp_state_frac", {})
+    if isinstance(state_frac, dict) and state_frac:
+        total = sum(max(float(state_frac.get(key, 0.0)), 0.0) for key in WARP_STATE_BASE_INPUT_ENERGY)
+        if total > 0.0:
+            return {
+                key: max(float(state_frac.get(key, 0.0)), 0.0) / total
+                for key in WARP_STATE_BASE_INPUT_ENERGY
+            }
+
+    active = float(max(min(active_warps, 1.0), 0.0))
+    stalled = active * float(max(min(stall_frac, 1.0), 0.0))
+    eligible = max(active - stalled, 0.0)
+    idle = max(1.0 - active, 0.0)
+    long_scoreboard = 0.6 * stalled
+    short_scoreboard = 0.25 * stalled
+    exec_dep = 0.15 * stalled
+    return {
+        "eligible": eligible,
+        "long_scoreboard": long_scoreboard,
+        "short_scoreboard": short_scoreboard,
+        "barrier": 0.0,
+        "exec_dep": exec_dep,
+        "mem_throttle": 0.0,
+        "fetch": 0.0,
+        "idle": idle,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -138,101 +195,96 @@ def compute_energy(
 
     snap = canonicalize_snapshot(snapshot)
 
-    # Extract snapshot fields with defaults
-    cycle           = float(snap.get("cycle", 1))
-    active_warps    = float(snap.get("active_warps", 0.5))    # fraction [0,1]
-    stall_frac      = float(snap.get("stall_fraction", 0.2))
-    instr_mix       = snap.get("instr_mix", {})
-    l2_hit_rate     = float(snap.get("l2_hit_rate", 0.8))
-    hbm_bw_util     = float(snap.get("hbm_bw_util", 0.3))
-    smem_util       = float(snap.get("smem_util", 0.5))
-    blocks          = int(snap.get("blocks_executed", 1))
+    cycle = float(snap.get("cycle", 1.0))
+    active_warps = float(snap.get("active_warps", 0.5))
+    stall_frac = float(snap.get("stall_fraction", 0.2))
+    memory_stall_frac = float(snap.get("memory_stall_fraction", 0.0))
+    instr_mix = _normalized_instr_mix(snap.get("instr_mix", {}))
+    l2_hit_rate = float(snap.get("l2_hit_rate", 0.8))
+    hbm_bw_util = float(snap.get("hbm_bw_util", 0.3))
+    smem_util = float(snap.get("smem_util", 0.5))
+    reg_util = float(snap.get("reg_util", 0.5))
+    issue_activity = float(snap.get("issue_activity", active_warps * (1.0 - stall_frac)))
+
+    blocks = int(snap.get("blocks_executed", 1))
     threads_per_blk = int(snap.get("threads_per_block", 128))
-
-    # Instruction mix fractions (default to an all-fp32 mix)
-    f_fp16 = float(instr_mix.get("fp16", 0.0))
-    f_fp32 = float(instr_mix.get("fp32", 1.0 - f_fp16))
-    f_int  = float(instr_mix.get("int", 0.0))
-    f_sfu  = float(instr_mix.get("sfu", 0.0))
-    f_tc   = float(instr_mix.get("tensor_core", 0.0))
-    # normalise
-    total_f = max(f_fp16 + f_fp32 + f_int + f_sfu + f_tc, 1e-9)
-    f_fp16 /= total_f; f_fp32 /= total_f; f_int /= total_f
-    f_sfu  /= total_f; f_tc   /= total_f
-
-    # Total thread-cycles for this snapshot
-    total_threads   = blocks * threads_per_blk
-    thread_cycles   = total_threads * cycle
-
-    # --- Compute energy (nJ) ---
-    # Number of active arithmetic thread-cycles
-    active_thread_cycles = thread_cycles * active_warps * (1.0 - stall_frac)
-
-    # Ops per thread-cycle (assuming 1 op/thread/cycle when active)
-    n_fp16_ops = active_thread_cycles * f_fp16
-    n_fp32_ops = active_thread_cycles * f_fp32
-    n_int_ops  = active_thread_cycles * f_int
-    n_sfu_ops  = active_thread_cycles * f_sfu
-    n_tc_ops   = active_thread_cycles * f_tc
-
-    E_compute_pj = (
-        n_fp16_ops * params.fp16_mac_pj +
-        n_fp32_ops * params.fp32_mac_pj +
-        n_int_ops  * params.int_op_pj   +
-        n_sfu_ops  * params.sfu_op_pj   +
-        n_tc_ops   * params.fp16_mac_pj   # tensor core same cost as FP16
+    active_sm_count = int(snap.get("active_sm_count", n_sm))
+    total_warp_cycles = float(
+        snap.get("total_warp_cycles", max(blocks * threads_per_blk / 32.0 * cycle, 0.0))
     )
 
-    # --- SRAM energy (nJ) ---
-    # Shared memory bytes touched per active thread-cycle (rough proxy: 16B/thread)
-    smem_bytes = active_thread_cycles * 16.0 * smem_util
-    reg_bytes  = active_thread_cycles * 8.0          # ~8B register traffic/thread/cycle
+    state_frac = _state_fractions(snap, active_warps, stall_frac)
+    mean_state_input = sum(
+        float(state_frac.get(state, 0.0)) * WARP_STATE_BASE_INPUT_ENERGY[state]
+        for state in WARP_STATE_BASE_INPUT_ENERGY
+    )
+    effective_issue_activity = float(np.clip(issue_activity, 0.0, 1.0))
+    issue_warp_cycles = total_warp_cycles * effective_issue_activity
+
+    instr_input_pj = sum(
+        instr_mix[key] * INSTRUCTION_CLASS_INPUT_ENERGY[key]
+        for key in INSTRUCTION_CLASS_INPUT_ENERGY
+    )
+    useful_work_pj = sum(
+        instr_mix[key] * INSTRUCTION_CLASS_USEFUL_WORK[key]
+        for key in INSTRUCTION_CLASS_USEFUL_WORK
+    )
+    mem_share = float(instr_mix.get("mem", 0.0))
+
+    control_input_pj = total_warp_cycles * mean_state_input + issue_warp_cycles * instr_input_pj
+
+    reg_bytes = issue_warp_cycles * 8.0 * max(reg_util, 0.25)
+    smem_bytes = issue_warp_cycles * 16.0 * smem_util
+    l2_bytes = issue_warp_cycles * 16.0 * mem_share * l2_hit_rate
+    hbm_bytes = issue_warp_cycles * 32.0 * mem_share * max(
+        hbm_bw_util,
+        (1.0 - l2_hit_rate) * (0.5 + 0.5 * memory_stall_frac),
+    )
 
     E_sram_pj = (
-        smem_bytes * params.smem_access_pj_per_byte +
-        reg_bytes  * params.reg_access_pj_per_byte
+        reg_bytes * params.reg_access_pj_per_byte
+        + smem_bytes * params.smem_access_pj_per_byte
     )
-
-    # --- DRAM energy (nJ) ---
-    # HBM bandwidth: H100 has ~3.35 TB/s ≈ 2094 bytes/cycle at 1.6 GHz
-    hbm_bytes_per_cycle = 2094.0 * n_sm
-    hbm_bytes_total = hbm_bytes_per_cycle * cycle * hbm_bw_util
-
-    # L2 bytes = HBM bytes / (1 - l2_hit_rate)  (cache amplification)
-    l2_bytes = hbm_bytes_total / max(1.0 - l2_hit_rate, 0.01)
-
     E_dram_pj = (
-        hbm_bytes_total * params.hbm_access_pj_per_byte +
-        l2_bytes        * params.l2_access_pj_per_byte
+        l2_bytes * params.l2_access_pj_per_byte
+        + hbm_bytes * params.hbm_access_pj_per_byte
     )
+    E_compute_pj = control_input_pj
+    E_leakage_pj = params.leakage_per_sm_per_cycle_pj * max(active_sm_count, 1) * cycle
 
-    # --- Leakage (nJ) ---
-    E_leakage_pj = params.leakage_per_sm_per_cycle_pj * n_sm * cycle
-
-    # --- Total ---
-    E_total_pj = E_compute_pj + E_sram_pj + E_dram_pj + E_leakage_pj
+    E_total_pj = control_input_pj + E_sram_pj + E_dram_pj + E_leakage_pj
     E_total_nj = E_total_pj * 1e-3
 
-    # --- Waste decomposition ---
-    # Stall waste: energy burned during stall cycles (mostly leakage + incomplete pipes)
-    stall_cycles = thread_cycles * stall_frac
-    Q_stall_pj = (
-        stall_cycles * params.leakage_per_sm_per_cycle_pj * n_sm * 0.5  # half-power stall
+    stall_proxy = (
+        sum(float(state_frac.get(state, 0.0)) for state in _STALL_STATE_KEYS)
+        * (control_input_pj + memory_stall_frac * E_dram_pj)
     )
+    idle_proxy = float(state_frac.get("idle", 0.0)) * (control_input_pj + E_leakage_pj)
+    movement_proxy = (
+        0.5 * mem_share * (1.0 - l2_hit_rate) + 0.5 * hbm_bw_util
+    ) * E_dram_pj
+    feed_efficiency = float(
+        max(
+            0.0,
+            min(
+                1.0,
+                0.5 * l2_hit_rate
+                + 0.3 * (1.0 - hbm_bw_util)
+                + 0.2 * (1.0 - memory_stall_frac),
+            ),
+        )
+    )
+    useful_proxy = issue_warp_cycles * useful_work_pj * feed_efficiency
 
-    # Idle waste: energy from SMs with no active warps
-    idle_frac = max(0.0, 1.0 - active_warps)
-    Q_idle_pj = idle_frac * E_leakage_pj
+    proxy_total = useful_proxy + stall_proxy + idle_proxy + movement_proxy
+    if proxy_total <= 1e-18:
+        proxy_total = 1.0
+    scale = E_total_pj / proxy_total
 
-    # Unnecessary data movement (proxy: L2 miss traffic beyond what arithmetic needs)
-    # A perfectly reusing kernel would load each byte exactly once from HBM.
-    # Excess = (actual HBM traffic) - (minimum HBM traffic for ops performed)
-    min_hbm_bytes = active_thread_cycles * (f_fp32 * 8.0 + f_fp16 * 4.0)  # operand bytes
-    excess_hbm_bytes = max(0.0, hbm_bytes_total - min_hbm_bytes)
-    Q_unnecessary_pj = excess_hbm_bytes * params.hbm_access_pj_per_byte
-
-    Q_waste_pj = Q_stall_pj + Q_idle_pj + Q_unnecessary_pj
-    W_hw_pj    = max(0.0, E_total_pj - Q_waste_pj)
+    W_hw_pj = useful_proxy * scale
+    Q_stall_pj = stall_proxy * scale
+    Q_idle_pj = idle_proxy * scale
+    Q_unnecessary_pj = movement_proxy * scale
 
     return EnergyDecomposition(
         E_total_nj=E_total_nj,

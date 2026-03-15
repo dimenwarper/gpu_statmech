@@ -14,14 +14,14 @@ def _gpusim_snapshot(**overrides) -> dict:
         "active_sm_id": 0,
         "total_virtual_cycles": 20,
         "warp_state_cycles": {
-            "eligible": 6,
-            "long_scoreboard": 4,
-            "short_scoreboard": 2,
+            "eligible": 96,
+            "long_scoreboard": 64,
+            "short_scoreboard": 32,
             "barrier": 0,
-            "exec_dep": 1,
-            "mem_throttle": 3,
+            "exec_dep": 16,
+            "mem_throttle": 48,
             "fetch": 0,
-            "idle": 4,
+            "idle": 64,
         },
         "sm_active_warps": [16, 32],
         "sm_max_warps": 64,
@@ -44,10 +44,11 @@ class TestCanonicalizeSnapshot:
     def test_flattens_gpusim_snapshot(self):
         snap = canonicalize_snapshot(_gpusim_snapshot())
         assert snap["cycle"] == 20.0
-        assert snap["active_warps"] == pytest.approx((16 + 32) / 2 / 64)
-        assert snap["stall_fraction"] == pytest.approx((4 + 2 + 1 + 3) / (20 - 4))
-        assert snap["memory_stall_fraction"] == pytest.approx((4 + 3) / 20)
-        assert snap["issue_activity"] == pytest.approx((6 + 0.35) / 20)
+        assert snap["active_warps"] == pytest.approx(16 / 64)
+        assert snap["stall_fraction"] == pytest.approx((64 + 32 + 16 + 48) / (320 - 64))
+        assert snap["memory_stall_fraction"] == pytest.approx((64 + 48) / 320)
+        assert snap["issue_activity"] == pytest.approx((96 + 0.35 * 16) / 320)
+        assert snap["total_warp_cycles"] == pytest.approx(320.0)
         assert snap["instr_mix"]["fp32"] == pytest.approx(0.75)
         assert snap["instr_mix"]["fp16"] == pytest.approx(0.25)
         assert snap["hbm_bw_util"] == pytest.approx(0.20)
@@ -72,11 +73,11 @@ class TestAggregateTraceObservables:
 
     def test_aggregates_gpusim_snapshots(self):
         obs = aggregate_trace_observables([_gpusim_snapshot(), _gpusim_snapshot()])
-        assert obs.mean_active_warp_fraction == pytest.approx((16 + 32) / 2 / 64)
-        assert obs.mean_stall_fraction == pytest.approx((4 + 2 + 1 + 3) / (20 - 4))
-        assert obs.mean_memory_stall_fraction == pytest.approx((4 + 3) / 20)
-        assert obs.mean_issue_activity == pytest.approx((6 + 0.35) / 20)
-        assert obs.mean_warp_state_fractions["eligible"] == pytest.approx(6 / 20)
+        assert obs.mean_active_warp_fraction == pytest.approx(16 / 64)
+        assert obs.mean_stall_fraction == pytest.approx((64 + 32 + 16 + 48) / (320 - 64))
+        assert obs.mean_memory_stall_fraction == pytest.approx((64 + 48) / 320)
+        assert obs.mean_issue_activity == pytest.approx((96 + 0.35 * 16) / 320)
+        assert obs.mean_warp_state_fractions["eligible"] == pytest.approx(96 / 320)
         assert 0.0 <= obs.memory_feed_efficiency_proxy <= 1.0
 
     def test_weights_by_snapshot_duration(self):
@@ -84,18 +85,18 @@ class TestAggregateTraceObservables:
         long = _gpusim_snapshot(
             total_virtual_cycles=30,
             warp_state_cycles={
-                "eligible": 3,
-                "long_scoreboard": 12,
+                "eligible": 72,
+                "long_scoreboard": 96,
                 "short_scoreboard": 0,
                 "barrier": 0,
                 "exec_dep": 0,
-                "mem_throttle": 6,
+                "mem_throttle": 48,
                 "fetch": 0,
-                "idle": 9,
+                "idle": 24,
             },
         )
         obs = aggregate_trace_observables([short, long])
-        expected = ((10 * (7 / 20)) + (30 * (18 / 30))) / 40
+        expected = ((10 * ((64 + 48) / 320)) + (30 * ((96 + 48) / 240))) / 40
         assert obs.mean_memory_stall_fraction == pytest.approx(expected)
 
     def test_empty_trace(self):
