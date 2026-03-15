@@ -23,7 +23,8 @@ and visualizes:
 - measured `eta_hw` vs inferred `eta_hw,max`
 - observed issue / stall / memory-stall fractions
 - inferred operating point (`beta`, memory-feed efficiency)
-- observed vs model-predicted warp-state occupancy
+- observed vs model-predicted thermodynamic state families
+- exact warp-state residuals as a secondary diagnostic
 
 **Figures:** `figures/01_canonical_overview.png`, `figures/01_warp_state_match.png`
 

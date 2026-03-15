@@ -285,6 +285,7 @@ class TestAnalyseKernel:
         assert 0.0 <= analysis.observables.mean_active_warp_fraction <= 1.0
         assert 0.0 <= analysis.observables.mean_stall_fraction <= 1.0
         assert 0.0 <= analysis.observables.mean_memory_stall_fraction <= 1.0
+        assert abs(sum(analysis.observables.mean_warp_state_family_fractions.values()) - 1.0) < 1e-9
         assert analysis.thermo_state.target_activity == pytest.approx(
             analysis.observables.mean_issue_activity,
             abs=1e-3,

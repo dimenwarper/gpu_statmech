@@ -23,7 +23,12 @@ import numpy as np
 
 from .carnot import CarnotLimit, derive_carnot_limit
 from .energy import EnergyDecomposition, EnergyParams, aggregate_energy, compute_energy
-from .observables import TraceObservables, aggregate_trace_observables, canonicalize_snapshot
+from .observables import (
+    TraceObservables,
+    aggregate_trace_observables,
+    canonicalize_snapshot,
+    warp_state_family_fractions,
+)
 from .partition_function import (
     H100_MEMORY_LEVELS,
     H100_SM_CONFIG,
@@ -50,25 +55,22 @@ class BetaInferenceMethod:
     CRUDE_WASTE_LOGIT = "crude_waste_logit"
 
 
-_STATE_MATCH_WEIGHTS = {
-    "eligible": 1.5,
-    "long_scoreboard": 2.0,
-    "short_scoreboard": 1.0,
-    "barrier": 1.0,
-    "exec_dep": 1.5,
-    "mem_throttle": 2.0,
-    "fetch": 1.0,
+_STATE_FAMILY_MATCH_WEIGHTS = {
+    "productive": 2.0,
+    "dependency": 1.5,
+    "memory": 2.5,
+    "sync_frontend": 1.0,
     "idle": 1.0,
 }
 
 
-def _warp_state_match_error(
+def _warp_state_family_match_error(
     observed: dict[str, float],
     predicted: dict[str, float],
 ) -> float:
     err = 0.0
-    for state, weight in _STATE_MATCH_WEIGHTS.items():
-        err += weight * (float(predicted.get(state, 0.0)) - float(observed.get(state, 0.0))) ** 2
+    for family, weight in _STATE_FAMILY_MATCH_WEIGHTS.items():
+        err += weight * (float(predicted.get(family, 0.0)) - float(observed.get(family, 0.0))) ** 2
     return err
 
 
@@ -473,24 +475,24 @@ def analyse_kernel(
                 memory_levels=memory_levels,
                 target_activity=observables.mean_issue_activity,
             )
-            state_err = _warp_state_match_error(
-                observables.mean_warp_state_fractions,
-                state.warp_state_fractions,
+            predicted_families = warp_state_family_fractions(state.warp_state_fractions)
+            family_err = _warp_state_family_match_error(
+                observables.mean_warp_state_family_fractions,
+                predicted_families,
             )
-            stall_err = (
-                state.warp_state_fractions.get("long_scoreboard", 0.0)
-                + state.warp_state_fractions.get("mem_throttle", 0.0)
-                - observables.mean_memory_stall_fraction
+            memory_err = (
+                predicted_families.get("memory", 0.0)
+                - observables.mean_warp_state_family_fractions.get("memory", 0.0)
             )
-            idle_err = (
-                state.warp_state_fractions.get("idle", 0.0)
-                - observables.mean_warp_state_fractions.get("idle", 0.0)
+            productive_err = (
+                predicted_families.get("productive", 0.0)
+                - observables.mean_warp_state_family_fractions.get("productive", 0.0)
             )
             feed_err = state.memory_feed_efficiency - observables.memory_feed_efficiency_proxy
             score = (
-                4.0 * state_err
-                + 1.5 * stall_err * stall_err
-                + 0.5 * idle_err * idle_err
+                4.0 * family_err
+                + 1.0 * memory_err * memory_err
+                + 0.5 * productive_err * productive_err
                 + 0.25 * feed_err * feed_err
             )
             if score < best_score:

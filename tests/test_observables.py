@@ -4,6 +4,7 @@ from gpu_statmech.observables import (
     TraceObservables,
     aggregate_trace_observables,
     canonicalize_snapshot,
+    warp_state_family_fractions,
 )
 
 
@@ -78,6 +79,8 @@ class TestAggregateTraceObservables:
         assert obs.mean_memory_stall_fraction == pytest.approx((64 + 48) / 320)
         assert obs.mean_issue_activity == pytest.approx((96 + 0.35 * 16) / 320)
         assert obs.mean_warp_state_fractions["eligible"] == pytest.approx(96 / 320)
+        assert obs.mean_warp_state_family_fractions["productive"] == pytest.approx(96 / 320)
+        assert obs.mean_warp_state_family_fractions["memory"] == pytest.approx((64 + 48) / 320)
         assert 0.0 <= obs.memory_feed_efficiency_proxy <= 1.0
 
     def test_weights_by_snapshot_duration(self):
@@ -103,3 +106,23 @@ class TestAggregateTraceObservables:
         obs = aggregate_trace_observables([])
         assert obs.n_snapshots == 0
         assert obs.mean_issue_activity == 0.0
+
+
+class TestWarpStateFamilies:
+    def test_families_normalize_and_collapse_states(self):
+        families = warp_state_family_fractions({
+            "eligible": 0.3,
+            "long_scoreboard": 0.2,
+            "short_scoreboard": 0.1,
+            "barrier": 0.05,
+            "exec_dep": 0.15,
+            "mem_throttle": 0.05,
+            "fetch": 0.05,
+            "idle": 0.1,
+        })
+        assert abs(sum(families.values()) - 1.0) < 1e-9
+        assert families["productive"] == pytest.approx(0.3)
+        assert families["dependency"] == pytest.approx(0.25)
+        assert families["memory"] == pytest.approx(0.25)
+        assert families["sync_frontend"] == pytest.approx(0.10)
+        assert families["idle"] == pytest.approx(0.1)

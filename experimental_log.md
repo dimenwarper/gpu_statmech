@@ -161,4 +161,8 @@
   - observed issue / stall / memory-stall fractions
   - issue-vs-memory-stall operating regimes
   - inferred `beta` and memory-feed efficiency
-- The warp-state figure compares observed `gpusim` warp-state occupancy against the model-predicted occupancy at the inferred operating point.
+- The second figure now treats exact warp-state occupancy as a secondary diagnostic:
+  - the primary comparison is observed vs model-predicted coarse state families
+    (`productive`, `dependency`, `memory`, `sync/fetch`, `idle`)
+  - the exact 8-state occupancy mismatch is shown only as a residual heatmap
+    so it is clearly a calibration diagnostic rather than the main fit target

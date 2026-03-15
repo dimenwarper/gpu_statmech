@@ -6,7 +6,8 @@ Runs the canonical simulator-backed kernel suite used by
   - measured hardware efficiency vs inferred single-kernel ceiling
   - observed issue/stall behavior
   - inferred operating point (beta and memory feed efficiency)
-  - observed vs model-predicted warp-state occupancy
+  - observed vs model-predicted thermodynamic state families
+  - exact warp-state residuals as a secondary diagnostic
 
 This is the first simulator-backed experiment category. It is not based on
 hardware spec numbers alone; it uses synthetic gpusim traces produced from the
@@ -30,6 +31,10 @@ from gpu_statmech.gpusim_driver import (  # noqa: E402
     canonical_kernel_profiles,
     load_gpusim_module,
     run_kernel_suite,
+)
+from gpu_statmech.observables import (  # noqa: E402
+    WARP_STATE_FAMILY_KEYS,
+    warp_state_family_fractions,
 )
 from gpu_statmech.thermo import analyse_protocol  # noqa: E402
 
@@ -55,15 +60,20 @@ STATE_ORDER = [
     "idle",
 ]
 
-STATE_COLORS = {
-    "eligible": "#4c72b0",
-    "exec_dep": "#8172b2",
-    "short_scoreboard": "#64b5cd",
-    "long_scoreboard": "#dd8452",
-    "mem_throttle": "#c44e52",
-    "barrier": "#937860",
-    "fetch": "#8c8c8c",
+FAMILY_ORDER = list(WARP_STATE_FAMILY_KEYS)
+FAMILY_COLORS = {
+    "productive": "#4c72b0",
+    "dependency": "#8172b2",
+    "memory": "#dd8452",
+    "sync_frontend": "#937860",
     "idle": "#b5bdc5",
+}
+FAMILY_LABELS = {
+    "productive": "productive",
+    "dependency": "dependency",
+    "memory": "memory",
+    "sync_frontend": "sync/fetch",
+    "idle": "idle",
 }
 
 
@@ -86,26 +96,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _stacked_barh(ax: plt.Axes, names: list[str], fractions: dict[str, list[float]], title: str) -> None:
-    left = np.zeros(len(names), dtype=float)
-    y = np.arange(len(names))
-    for state in STATE_ORDER:
-        vals = np.asarray(fractions[state], dtype=float)
+def _paired_family_bars(
+    ax: plt.Axes,
+    names: list[str],
+    observed: dict[str, list[float]],
+    predicted: dict[str, list[float]],
+) -> None:
+    y = np.arange(len(names), dtype=float)
+    height = 0.34
+    left_obs = np.zeros(len(names), dtype=float)
+    left_pred = np.zeros(len(names), dtype=float)
+    for family in FAMILY_ORDER:
+        obs_vals = np.asarray(observed[family], dtype=float)
+        pred_vals = np.asarray(predicted[family], dtype=float)
         ax.barh(
-            y,
-            vals * 100.0,
-            left=left * 100.0,
-            color=STATE_COLORS[state],
+            y + height / 2,
+            obs_vals * 100.0,
+            height=height,
+            left=left_obs * 100.0,
+            color=FAMILY_COLORS[family],
             edgecolor="white",
             linewidth=0.4,
-            label=state,
         )
-        left += vals
+        ax.barh(
+            y - height / 2,
+            pred_vals * 100.0,
+            height=height,
+            left=left_pred * 100.0,
+            color=FAMILY_COLORS[family],
+            edgecolor="white",
+            linewidth=0.4,
+            alpha=0.6,
+        )
+        left_obs += obs_vals
+        left_pred += pred_vals
+
     ax.set_yticks(y)
     ax.set_yticklabels(names)
     ax.set_xlim(0.0, 100.0)
-    ax.set_xlabel("Warp-state occupancy (%)")
-    ax.set_title(title)
+    ax.set_xlabel("State-family occupancy (%)")
+    ax.set_title("Observed (solid) vs predicted (transparent) families")
     ax.grid(True, axis="x", alpha=0.25)
 
 
@@ -150,6 +180,17 @@ def main() -> int:
     predicted_state = {
         state: [analysis.thermo_state.warp_state_fractions.get(state, 0.0) for analysis in analyses]
         for state in STATE_ORDER
+    }
+    observed_families = {
+        family: [analysis.observables.mean_warp_state_family_fractions.get(family, 0.0) for analysis in analyses]
+        for family in FAMILY_ORDER
+    }
+    predicted_families = {
+        family: [
+            warp_state_family_fractions(analysis.thermo_state.warp_state_fractions).get(family, 0.0)
+            for analysis in analyses
+        ]
+        for family in FAMILY_ORDER
     }
 
     print("=" * 72)
@@ -257,17 +298,53 @@ def main() -> int:
     plt.close(fig1)
     print(f"\nSaved figure         : {out1}")
 
-    # Figure 2: observed vs predicted warp-state breakdown
-    fig2, (ax_obs, ax_pred) = plt.subplots(1, 2, figsize=(15, 5.5), sharey=True)
+    # Figure 2: family-level fit + exact-state residuals
+    fig2, (ax_family, ax_resid) = plt.subplots(
+        1,
+        2,
+        figsize=(15.5, 5.8),
+        gridspec_kw={"width_ratios": [1.2, 1.0]},
+    )
     fig2.suptitle(
-        "Observed vs Model-Predicted Warp-State Occupancy",
+        "Family-Level Fit with Exact-State Residual Diagnostic",
         fontsize=13,
         fontweight="bold",
     )
-    _stacked_barh(ax_obs, names, observed_state, "Observed from gpusim traces")
-    _stacked_barh(ax_pred, names, predicted_state, "Predicted by inferred thermodynamic state")
-    handles = [Patch(facecolor=STATE_COLORS[state], label=state) for state in STATE_ORDER]
-    fig2.legend(handles=handles, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, -0.02))
+    _paired_family_bars(ax_family, names, observed_families, predicted_families)
+
+    residual = np.asarray(
+        [
+            [
+                predicted_state[state][idx] - observed_state[state][idx]
+                for state in STATE_ORDER
+            ]
+            for idx in range(len(names))
+        ],
+        dtype=float,
+    )
+    vmax = float(max(np.max(np.abs(residual)), 1e-6))
+    im = ax_resid.imshow(residual, cmap="coolwarm", vmin=-vmax, vmax=vmax, aspect="auto")
+    ax_resid.set_xticks(np.arange(len(STATE_ORDER)))
+    ax_resid.set_xticklabels(STATE_ORDER, rotation=35, ha="right")
+    ax_resid.set_yticks(np.arange(len(names)))
+    ax_resid.set_yticklabels(names)
+    ax_resid.set_title("Exact-state residuals\n(predicted - observed)")
+    for row in range(residual.shape[0]):
+        for col in range(residual.shape[1]):
+            ax_resid.text(
+                col,
+                row,
+                f"{residual[row, col] * 100:.0f}",
+                ha="center",
+                va="center",
+                fontsize=7,
+                color="black",
+            )
+    cbar = fig2.colorbar(im, ax=ax_resid, fraction=0.046, pad=0.04)
+    cbar.set_label("Residual occupancy fraction")
+
+    family_handles = [Patch(facecolor=FAMILY_COLORS[family], label=FAMILY_LABELS[family]) for family in FAMILY_ORDER]
+    fig2.legend(handles=family_handles, loc="lower center", ncol=5, frameon=False, bbox_to_anchor=(0.36, -0.02))
     fig2.tight_layout(rect=(0, 0.05, 1, 1))
     out2 = FIGURES / "01_warp_state_match.png"
     fig2.savefig(out2, dpi=160, bbox_inches="tight")

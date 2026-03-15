@@ -13,6 +13,23 @@ from .partition_function import WARP_STATE_ACTIVITY
 
 
 WARP_STATE_KEYS = tuple(WARP_STATE_ACTIVITY)
+WARP_STATE_FAMILY_KEYS = (
+    "productive",
+    "dependency",
+    "memory",
+    "sync_frontend",
+    "idle",
+)
+WARP_STATE_TO_FAMILY = {
+    "eligible": "productive",
+    "exec_dep": "dependency",
+    "short_scoreboard": "dependency",
+    "long_scoreboard": "memory",
+    "mem_throttle": "memory",
+    "barrier": "sync_frontend",
+    "fetch": "sync_frontend",
+    "idle": "idle",
+}
 
 
 def _mean_or(default: float, values: Any) -> float:
@@ -152,6 +169,32 @@ def _weighted_mean(values: list[float], weights: np.ndarray) -> float:
     return float(np.average(np.asarray(values, dtype=float), weights=weights))
 
 
+def warp_state_family_fractions(state_frac: dict[str, float]) -> dict[str, float]:
+    """
+    Collapse scheduler-visible warp states into coarse thermodynamic families.
+
+    These families are the trace-level sufficient statistics we care about for
+    efficiency inference:
+      - productive      : eligible issue slots
+      - dependency      : exec-dep and short scoreboard stalls
+      - memory          : long scoreboard and mem-throttle stalls
+      - sync_frontend   : barrier and fetch stalls
+      - idle            : no runnable warp
+    """
+    families = {family: 0.0 for family in WARP_STATE_FAMILY_KEYS}
+    if not state_frac:
+        return families
+
+    total = sum(max(float(state_frac.get(key, 0.0)), 0.0) for key in WARP_STATE_KEYS)
+    if total <= 0.0:
+        return families
+
+    for state in WARP_STATE_KEYS:
+        family = WARP_STATE_TO_FAMILY[state]
+        families[family] += max(float(state_frac.get(state, 0.0)), 0.0) / total
+    return families
+
+
 def canonicalize_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     """
     Convert a raw gpusim snapshot into the flat schema expected by gpu_statmech.
@@ -244,6 +287,7 @@ class TraceObservables:
     mean_hbm_bw_utilization: float
     mean_nvlink_bw_utilization: float
     mean_warp_state_fractions: dict[str, float]
+    mean_warp_state_family_fractions: dict[str, float]
     n_snapshots: int
 
     @property
@@ -281,6 +325,7 @@ def aggregate_trace_observables(snapshots: list[dict[str, Any]]) -> TraceObserva
             mean_hbm_bw_utilization=0.0,
             mean_nvlink_bw_utilization=0.0,
             mean_warp_state_fractions={key: 0.0 for key in WARP_STATE_KEYS},
+            mean_warp_state_family_fractions={key: 0.0 for key in WARP_STATE_FAMILY_KEYS},
             n_snapshots=0,
         )
 
@@ -305,6 +350,7 @@ def aggregate_trace_observables(snapshots: list[dict[str, Any]]) -> TraceObserva
         )
         for key in WARP_STATE_KEYS
     }
+    family_fracs = warp_state_family_fractions(state_fracs)
 
     return TraceObservables(
         mean_active_warp_fraction=active,
@@ -317,5 +363,6 @@ def aggregate_trace_observables(snapshots: list[dict[str, Any]]) -> TraceObserva
         mean_hbm_bw_utilization=hbm,
         mean_nvlink_bw_utilization=nvlink,
         mean_warp_state_fractions=state_fracs,
+        mean_warp_state_family_fractions=family_fracs,
         n_snapshots=len(snaps),
     )
