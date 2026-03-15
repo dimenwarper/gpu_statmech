@@ -30,7 +30,6 @@ from .partition_function import (
     MemoryLevel,
     SMConfig,
     ThermodynamicState,
-    mean_compute_mem_stall_fraction,
     thermodynamic_quantities,
 )
 
@@ -49,6 +48,28 @@ class ExecutionPhase:
 class BetaInferenceMethod:
     OBSERVABLE_MATCH = "observable_match"
     CRUDE_WASTE_LOGIT = "crude_waste_logit"
+
+
+_STATE_MATCH_WEIGHTS = {
+    "eligible": 1.5,
+    "long_scoreboard": 2.0,
+    "short_scoreboard": 1.0,
+    "barrier": 1.0,
+    "exec_dep": 1.5,
+    "mem_throttle": 2.0,
+    "fetch": 1.0,
+    "idle": 1.0,
+}
+
+
+def _warp_state_match_error(
+    observed: dict[str, float],
+    predicted: dict[str, float],
+) -> float:
+    err = 0.0
+    for state, weight in _STATE_MATCH_WEIGHTS.items():
+        err += weight * (float(predicted.get(state, 0.0)) - float(observed.get(state, 0.0))) ** 2
+    return err
 
 
 def classify_phase(
@@ -408,8 +429,6 @@ def analyse_kernel(
     # Entropy
     entropy = estimate_entropy(snapshots)
 
-    hbm_bw = memory_levels[-1].bandwidth_bytes_per_cycle
-
     # Thermodynamic state at the observed operating point
     if beta_inference_method == BetaInferenceMethod.CRUDE_WASTE_LOGIT:
         wf = energy.waste_fraction
@@ -454,18 +473,26 @@ def analyse_kernel(
                 memory_levels=memory_levels,
                 target_activity=observables.mean_issue_activity,
             )
-            predicted_memory_stall = mean_compute_mem_stall_fraction(
-                beta,
-                sm_config,
-                hbm_bw,
-                memory_levels=memory_levels,
-                target_activity=observables.mean_issue_activity,
+            state_err = _warp_state_match_error(
+                observables.mean_warp_state_fractions,
+                state.warp_state_fractions,
             )
             stall_err = (
-                predicted_memory_stall - observables.mean_memory_stall_fraction
+                state.warp_state_fractions.get("long_scoreboard", 0.0)
+                + state.warp_state_fractions.get("mem_throttle", 0.0)
+                - observables.mean_memory_stall_fraction
+            )
+            idle_err = (
+                state.warp_state_fractions.get("idle", 0.0)
+                - observables.mean_warp_state_fractions.get("idle", 0.0)
             )
             feed_err = state.memory_feed_efficiency - observables.memory_feed_efficiency_proxy
-            score = 2.0 * stall_err * stall_err + feed_err * feed_err
+            score = (
+                4.0 * state_err
+                + 1.5 * stall_err * stall_err
+                + 0.5 * idle_err * idle_err
+                + 0.25 * feed_err * feed_err
+            )
             if score < best_score:
                 best_score = score
                 best_state = state

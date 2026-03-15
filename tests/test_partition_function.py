@@ -23,6 +23,7 @@ from gpu_statmech.partition_function import (
     SMConfig,
     ThermodynamicState,
     TopologyEdge,
+    WARP_STATE_WASTE,
     beta_sweep,
     dgx_h100_edges,
     gpu_partition_function,
@@ -31,6 +32,7 @@ from gpu_statmech.partition_function import (
     memory_feed_efficiency,
     memory_level_occupancies,
     mean_compute_activity,
+    mean_compute_warp_state_fractions,
     mean_warp_activity,
     mean_warp_input_energy,
     mean_warp_useful_work,
@@ -107,6 +109,18 @@ class TestZWarp:
     def test_memory_feed_efficiency_in_unit_interval(self):
         eff = memory_feed_efficiency(1.0)
         assert 0.0 <= eff <= 1.0
+
+    def test_compute_warp_state_fractions_normalized(self):
+        hbm_bw = H100_MEMORY_LEVELS[-1].bandwidth_bytes_per_cycle
+        state_fracs = mean_compute_warp_state_fractions(
+            1.0,
+            H100_SM_CONFIG,
+            hbm_bw,
+            target_activity=0.2,
+        )
+        assert set(state_fracs) == set(WARP_STATE_WASTE)
+        assert abs(sum(state_fracs.values()) - 1.0) < 1e-9
+        assert all(0.0 <= v <= 1.0 for v in state_fracs.values())
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +288,10 @@ class TestThermodynamicQuantities:
 
     def test_eta_hw_in_unit_interval(self, state):
         assert 0.0 <= state.eta_hw <= 1.0 + 1e-6
+
+    def test_warp_state_fractions_normalized(self, state):
+        assert abs(sum(state.warp_state_fractions.values()) - 1.0) < 1e-9
+        assert all(0.0 <= value <= 1.0 for value in state.warp_state_fractions.values())
 
     def test_state_activity_increases_with_activity_potential(self):
         low = thermodynamic_quantities(beta=1.0, activity_potential=0.0)

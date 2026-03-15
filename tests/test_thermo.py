@@ -289,6 +289,7 @@ class TestAnalyseKernel:
             analysis.observables.mean_issue_activity,
             abs=1e-3,
         )
+        assert abs(sum(analysis.thermo_state.warp_state_fractions.values()) - 1.0) < 1e-9
 
 
 # ---------------------------------------------------------------------------

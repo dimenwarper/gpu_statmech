@@ -261,6 +261,15 @@ def _mean_mem_stall_from_weights(weights: NDArray[np.float64]) -> float:
     return float(np.dot(state_weights, _MEM_STALL_MASK) / total)
 
 
+def _warp_state_fractions_from_weights(weights: NDArray[np.float64]) -> dict[str, float]:
+    state_weights = weights.sum(axis=1)
+    total = max(float(state_weights.sum()), 1e-300)
+    return {
+        state: float(state_weights[idx] / total)
+        for idx, state in enumerate(_STATE_NAMES)
+    }
+
+
 def _solve_bandwidth_penalty(
     beta: float,
     sm_config: SMConfig,
@@ -590,6 +599,53 @@ def mean_compute_mem_stall_fraction(
         bandwidth_penalty=bandwidth_penalty,
     )
     return _mean_mem_stall_from_weights(weights)
+
+
+def mean_compute_warp_state_fractions(
+    beta: float,
+    sm_config: SMConfig,
+    hbm_bandwidth_bytes_per_cycle: float,
+    memory_levels: list[MemoryLevel] | None = None,
+    apply_bandwidth_correction: bool = True,
+    work_field: float = 0.0,
+    activity_potential: float | None = None,
+    target_activity: float | None = None,
+) -> dict[str, float]:
+    """
+    Mean equilibrium warp-state fractions for the compute subsystem.
+
+    This uses the same operating-point closure as ``thermodynamic_quantities()``
+    so inference can compare simulator-observed warp-state occupancy directly
+    against the model prediction.
+    """
+    if memory_levels is None:
+        memory_levels = H100_MEMORY_LEVELS
+
+    feed_eff = memory_feed_efficiency(beta, memory_levels)
+    resolved_work_field = _resolve_operating_work_field(
+        beta,
+        sm_config,
+        hbm_bandwidth_bytes_per_cycle,
+        work_field=work_field,
+        activity_potential=activity_potential,
+        target_activity=target_activity,
+        memory_feed_factor=feed_eff,
+    )
+    effective_work_field = resolved_work_field * feed_eff
+    bandwidth_penalty = 0.0
+    if apply_bandwidth_correction:
+        bandwidth_penalty, _ = _solve_bandwidth_penalty(
+            beta,
+            sm_config,
+            hbm_bandwidth_bytes_per_cycle,
+            work_field=effective_work_field,
+        )
+    weights = _warp_microstate_weights(
+        beta,
+        work_field=effective_work_field,
+        bandwidth_penalty=bandwidth_penalty,
+    )
+    return _warp_state_fractions_from_weights(weights)
 
 
 def solve_work_field(
@@ -934,6 +990,7 @@ class ThermodynamicState:
     mean_useful_work: float      # <W_hw>
     mean_waste: float            # <E_in - W_hw>
     mean_activity: float         # productive issue activity per warp-cycle
+    warp_state_fractions: dict[str, float]
     target_activity: float | None
     entropy: float               # S = β(<E_eff> - F)  [dimensionless]
     specific_heat: float         # Cv = β² d<E_eff>/dβ  [dimensionless]
@@ -1133,6 +1190,14 @@ def thermodynamic_quantities(
         work_field=effective_work_field,
     )
     mean_compute_work = feed_eff * mean_compute_work_raw
+    warp_state_fractions = mean_compute_warp_state_fractions(
+        beta,
+        sm_config,
+        hbm_bw,
+        memory_levels=memory_levels,
+        work_field=resolved_work_field,
+        target_activity=target_activity,
+    )
     mean_input_energy = mean_compute_input + mean_memory_input_energy + mean_comm_input_energy
     mean_useful_work = mean_compute_work
     mean_waste = max(mean_input_energy - mean_useful_work, 0.0)
@@ -1155,6 +1220,7 @@ def thermodynamic_quantities(
         mean_useful_work=mean_useful_work,
         mean_waste=mean_waste,
         mean_activity=mean_activity,
+        warp_state_fractions=warp_state_fractions,
         target_activity=target_activity,
         entropy=entropy,
         specific_heat=specific_heat,
