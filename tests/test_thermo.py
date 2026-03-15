@@ -63,6 +63,18 @@ def _gpusim_snap(**overrides) -> dict:
     base = {
         "cycle": 1,
         "gpu_id": 0,
+        "active_sm_id": 0,
+        "total_virtual_cycles": 24,
+        "warp_state_cycles": {
+            "eligible": 8,
+            "long_scoreboard": 6,
+            "short_scoreboard": 2,
+            "barrier": 0,
+            "exec_dep": 2,
+            "mem_throttle": 2,
+            "fetch": 0,
+            "idle": 4,
+        },
         "sm_active_warps": [24, 20, 16, 12],
         "sm_max_warps": 64,
         "sm_instr_mix": [{"fp32": 1.0, "fp16": 0.0, "int": 0.0, "sfu": 0.0, "mem": 0.0, "tensor_core": 0.0}] * 4,
@@ -190,6 +202,7 @@ class TestAnalyseKernel:
         analysis = analyse_kernel("gpusim", [_gpusim_snap()] * 4, carnot_limit=limit)
         assert 0.0 <= analysis.observables.mean_active_warp_fraction <= 1.0
         assert 0.0 <= analysis.observables.mean_stall_fraction <= 1.0
+        assert 0.0 <= analysis.observables.mean_memory_stall_fraction <= 1.0
         assert analysis.thermo_state.target_activity == pytest.approx(
             analysis.observables.mean_issue_activity,
             abs=1e-3,

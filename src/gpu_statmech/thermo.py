@@ -417,14 +417,16 @@ def analyse_kernel(
                 memory_levels=memory_levels,
                 target_activity=observables.mean_issue_activity,
             )
-            predicted_stall = mean_compute_mem_stall_fraction(
+            predicted_memory_stall = mean_compute_mem_stall_fraction(
                 beta,
                 sm_config,
                 hbm_bw,
                 memory_levels=memory_levels,
                 target_activity=observables.mean_issue_activity,
             )
-            stall_err = predicted_stall - observables.mean_stall_fraction
+            stall_err = (
+                predicted_memory_stall - observables.mean_memory_stall_fraction
+            )
             feed_err = state.memory_feed_efficiency - observables.memory_feed_efficiency_proxy
             score = 2.0 * stall_err * stall_err + feed_err * feed_err
             if score < best_score:
