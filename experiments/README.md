@@ -19,6 +19,7 @@ uv pip install -e ".[experiments]"
 # run any script directly
 uv run python experiments/theoretical_calculations/01_carnot_curve.py
 uv run python experiments/simulator_validation/01_canonical_kernel_profiles.py
+uv run python experiments/simulator_validation/02_intervention_recommendation.py
 ```
 
 ## Planned

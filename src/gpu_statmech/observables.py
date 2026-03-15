@@ -12,6 +12,7 @@ import numpy as np
 from .partition_function import WARP_STATE_ACTIVITY
 
 
+INSTR_KEYS = ("fp16", "fp32", "int", "sfu", "mem", "tensor_core")
 WARP_STATE_KEYS = tuple(WARP_STATE_ACTIVITY)
 WARP_STATE_FAMILY_KEYS = (
     "productive",
@@ -41,17 +42,16 @@ def _mean_or(default: float, values: Any) -> float:
 
 
 def _average_instr_mix(mixes: Any) -> dict[str, float]:
-    keys = ("fp16", "fp32", "int", "sfu", "mem", "tensor_core")
     if not isinstance(mixes, list) or not mixes:
         return {}
 
-    totals = {k: 0.0 for k in keys}
+    totals = {k: 0.0 for k in INSTR_KEYS}
     for mix in mixes:
-        for key in keys:
+        for key in INSTR_KEYS:
             totals[key] += float(mix.get(key, 0.0))
 
     n = float(len(mixes))
-    return {k: totals[k] / n for k in keys}
+    return {k: totals[k] / n for k in INSTR_KEYS}
 
 
 def _normalize_warp_state_fractions(snapshot: dict[str, Any]) -> dict[str, float]:
@@ -286,6 +286,7 @@ class TraceObservables:
     mean_l2_hit_rate: float
     mean_hbm_bw_utilization: float
     mean_nvlink_bw_utilization: float
+    mean_instr_mix: dict[str, float]
     mean_warp_state_fractions: dict[str, float]
     mean_warp_state_family_fractions: dict[str, float]
     n_snapshots: int
@@ -324,6 +325,7 @@ def aggregate_trace_observables(snapshots: list[dict[str, Any]]) -> TraceObserva
             mean_l2_hit_rate=0.0,
             mean_hbm_bw_utilization=0.0,
             mean_nvlink_bw_utilization=0.0,
+            mean_instr_mix={key: 0.0 for key in INSTR_KEYS},
             mean_warp_state_fractions={key: 0.0 for key in WARP_STATE_KEYS},
             mean_warp_state_family_fractions={key: 0.0 for key in WARP_STATE_FAMILY_KEYS},
             n_snapshots=0,
@@ -343,6 +345,13 @@ def aggregate_trace_observables(snapshots: list[dict[str, Any]]) -> TraceObserva
     l2 = _weighted_mean([s["l2_hit_rate"] for s in snaps], weights)
     hbm = _weighted_mean([s["hbm_bw_util"] for s in snaps], weights)
     nvlink = _weighted_mean([s["bw_nvlink"] for s in snaps], weights)
+    instr_mix = {
+        key: _weighted_mean(
+            [float(s.get("instr_mix", {}).get(key, 0.0)) for s in snaps],
+            weights,
+        )
+        for key in INSTR_KEYS
+    }
     state_fracs = {
         key: _weighted_mean(
             [float(s.get("warp_state_frac", {}).get(key, 0.0)) for s in snaps],
@@ -362,6 +371,7 @@ def aggregate_trace_observables(snapshots: list[dict[str, Any]]) -> TraceObserva
         mean_l2_hit_rate=l2,
         mean_hbm_bw_utilization=hbm,
         mean_nvlink_bw_utilization=nvlink,
+        mean_instr_mix=instr_mix,
         mean_warp_state_fractions=state_fracs,
         mean_warp_state_family_fractions=family_fracs,
         n_snapshots=len(snaps),

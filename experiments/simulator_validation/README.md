@@ -28,6 +28,30 @@ and visualizes:
 
 **Figures:** `figures/01_canonical_overview.png`, `figures/01_warp_state_match.png`
 
+### 02 — Simulator Intervention Recommendation [`02_intervention_recommendation.py`](02_intervention_recommendation.py)
+
+Builds a counterfactual neighborhood around the canonical `gpusim` kernel
+families, then asks a decision question:
+
+- from the baseline trace alone, which intervention class should we try next?
+
+The script compares:
+
+- stat-mech recommendation
+- raw counter-family heuristic
+- roofline-style heuristic
+- occupancy-only heuristic
+- random choice
+
+against an oracle that evaluates every candidate intervention on the simulator.
+
+Primary metric:
+
+- oracle attainment ratio = realized gain from the chosen lever / realized gain
+  from the oracle-best lever
+
+**Figures:** `figures/02_oracle_attainment.png`, `figures/02_statmech_confusion.png`
+
 ## Running
 
 The `gpusim` Python extension must be installed into the same environment used
@@ -39,5 +63,6 @@ uv run --with matplotlib --with maturin bash -lc '
   maturin develop --features python
   cd ../gpu_statmech
   python experiments/simulator_validation/01_canonical_kernel_profiles.py --gpu h100
+  python experiments/simulator_validation/02_intervention_recommendation.py --gpu h100
 '
 ```

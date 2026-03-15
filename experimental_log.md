@@ -166,3 +166,44 @@
     (`productive`, `dependency`, `memory`, `sync/fetch`, `idle`)
   - the exact 8-state occupancy mismatch is shown only as a residual heatmap
     so it is clearly a calibration diagnostic rather than the main fit target
+
+### Simulator intervention recommendation
+
+- Added `src/gpu_statmech/gpusim_recommendation.py` plus
+  `experiments/simulator_validation/02_intervention_recommendation.py`.
+- The new experiment turns the simulator path into a recommendation study:
+  - generate controlled stressed baselines from the canonical kernel families
+  - generate one counterfactual variant per intervention lever
+  - recommend a lever from the baseline trace alone
+  - compare against the oracle-best lever found by actually running all
+    counterfactuals in `gpusim`
+- Current intervention levers are:
+  - `locality`
+  - `occupancy`
+  - `tensorize`
+- Current stressed baseline modes are:
+  - `base`
+  - `memory_stressed`
+  - `footprint_stressed`
+  - `compute_unoptimized`
+- Current outputs:
+  - `experiments/simulator_validation/figures/02_oracle_attainment.png`
+  - `experiments/simulator_validation/figures/02_statmech_confusion.png`
+- On the current H100 simulator sweep:
+  - actionable baselines: `18 / 20`
+  - mean oracle attainment:
+    - `stat-mech`: `0.865`
+    - `raw counters`: `0.870`
+    - `roofline`: `0.759`
+    - `occupancy only`: `0.001`
+    - `random`: `0.728`
+- Interpretation:
+  - the thermodynamic recommender is already substantially better than the
+    weak baselines (`roofline`, `occupancy only`, `random`)
+  - the strongest simple baseline is still the raw counter-family heuristic,
+    which slightly outperforms the current stat-mech mapping on this synthetic
+    suite
+  - that is a useful gap, not a contradiction: the simulator interventions are
+    still tightly aligned to the same coarse families used in the raw-counter
+    policy, so the next improvement is to make the thermodynamic mapping more
+    discriminative than simple family-majority rules

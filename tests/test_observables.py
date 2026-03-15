@@ -78,6 +78,8 @@ class TestAggregateTraceObservables:
         assert obs.mean_stall_fraction == pytest.approx((64 + 32 + 16 + 48) / (320 - 64))
         assert obs.mean_memory_stall_fraction == pytest.approx((64 + 48) / 320)
         assert obs.mean_issue_activity == pytest.approx((96 + 0.35 * 16) / 320)
+        assert obs.mean_instr_mix["fp32"] == pytest.approx(0.75)
+        assert obs.mean_instr_mix["fp16"] == pytest.approx(0.25)
         assert obs.mean_warp_state_fractions["eligible"] == pytest.approx(96 / 320)
         assert obs.mean_warp_state_family_fractions["productive"] == pytest.approx(96 / 320)
         assert obs.mean_warp_state_family_fractions["memory"] == pytest.approx((64 + 48) / 320)
